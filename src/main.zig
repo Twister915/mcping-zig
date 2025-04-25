@@ -119,6 +119,7 @@ fn ping(allocator: std.mem.Allocator, target: Target) !PingResponse {
 
 fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile) !void {
     var conn = try CraftConn.connect(allocator, target.host, target.port);
+    defer conn.deinit();
     // state = handshaking
     _ = try conn.writePacket(.init(0x00), CraftPacket.HandshakingPacket{
         .address = .init(target.host),
