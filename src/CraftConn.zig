@@ -29,44 +29,50 @@ pub fn deinit(conn: Conn) void {
 
 pub const ReadPkt = struct {
     id: CraftTypes.VarInt,
+    // we're borrowing this memory from the connection, so that's why there's const and no deinit
     data: []const u8,
-    conn: *const Conn,
 
     const Self = @This();
 
-    pub fn decodeAs(self: Self, comptime T: type) !CraftTypes.Decoded(T) {
+    // if you call this, we decode the packet into owned memory (call deinit() on the returned T)
+    pub fn decodeAs(self: Self, allocator: std.mem.Allocator, comptime T: type) !T {
         var stream = std.io.fixedBufferStream(self.data);
-        return T.decode(self.conn.allocator, stream.reader());
+        const expectedLen = self.data.len;
+        const decoded: CraftTypes.Decoded(T) = try T.decode(allocator, stream.reader(), expectedLen);
+        if (decoded.bytes != expectedLen) {
+            return error.PacketNotCompletelyParsed;
+        }
+        return decoded.value;
     }
 };
 
-pub fn readPacket(conn: *Conn) !CraftTypes.Decoded(ReadPkt) {
+pub fn readPacket(conn: *Conn) !ReadPkt {
     conn.buf.clearRetainingCapacity();
 
     const reader = conn.reader.reader();
     var bytes: usize = 0;
-    var bodyLength: usize = @intCast((try CraftTypes.VarInt.decode(conn.allocator, reader)).unbox(&bytes).value);
+    var bodyLength: usize = @intCast((try CraftTypes.VarInt.decode(conn.allocator, reader, CraftTypes.VarInt.ByteSize)).unbox(&bytes).value);
     bytes += bodyLength;
 
-    const packetIdDecoded = try CraftTypes.VarInt.decode(conn.allocator, reader);
+    const packetIdDecoded = try CraftTypes.VarInt.decode(conn.allocator, reader, CraftTypes.VarInt.ByteSize);
     bodyLength -= packetIdDecoded.bytes;
 
     const body = try conn.buf.addManyAsSlice(bodyLength);
     try reader.readNoEof(body);
 
     return .{
-        .value = .{
-            .id = packetIdDecoded.value,
-            .data = body,
-            .conn = conn,
-        },
-        .bytes = bytes,
+        .id = packetIdDecoded.value,
+        .data = body,
     };
 }
 
 pub fn writePacket(conn: *Conn, id: CraftTypes.VarInt, packet: anytype) !usize {
     if (std.meta.hasFn(@TypeOf(packet), "deinit")) {
         defer packet.deinit();
+    }
+
+    if (!std.meta.hasFn(@TypeOf(packet), "encode")) {
+        @compileError("packet type " ++ @typeName(@TypeOf(packet)) ++ " does not have encode method");
     }
 
     conn.buf.clearRetainingCapacity();

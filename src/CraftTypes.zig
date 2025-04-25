@@ -14,7 +14,7 @@ pub fn Decoded(comptime Target: type) type {
         // potentially calls into deinit of the value
         pub fn deinit(self: Self) void {
             if (std.meta.hasFn(Target, "deinit")) {
-                defer self.value.deinit();
+                self.value.deinit();
             }
         }
 
@@ -84,7 +84,7 @@ fn VarNum(comptime Bits: u16) type {
             }
         }
 
-        pub fn decode(_: std.mem.Allocator, reader: anytype) !Decoded(Self) {
+        pub fn decode(_: std.mem.Allocator, reader: anytype, _: usize) !Decoded(Self) {
             var bitsRead: BitCounter = 0;
             var value: Int = 0;
             var bytesRead: usize = 0;
@@ -138,7 +138,7 @@ fn CraftInt(i: type) type {
             return Length;
         }
 
-        pub fn decode(_: std.mem.Allocator, reader: anytype) !Decoded(Self) {
+        pub fn decode(_: std.mem.Allocator, reader: anytype, _: usize) !Decoded(Self) {
             return .{ .bytes = Length, .value = .{ .value = try reader.readInt(Int, .big) } };
         }
 
@@ -156,6 +156,7 @@ pub const UByte = CraftInt(u8);
 pub const Bool = struct {
     value: bool,
 
+    pub const ByteSize: usize = 1;
     const Self = @This();
 
     pub fn init(v: bool) Self {
@@ -163,15 +164,15 @@ pub const Bool = struct {
     }
 
     pub fn length(_: *const Self) usize {
-        return 1;
+        return ByteSize;
     }
 
     pub fn encode(self: *const Self, writer: anytype) !usize {
         try writer.writeByte(if (self.value) 1 else 0);
-        return 1;
+        return ByteSize;
     }
 
-    pub fn decode(_: std.mem.Allocator, reader: anytype) !Decoded(Self) {
+    pub fn decode(_: std.mem.Allocator, reader: anytype, _: usize) !Decoded(Self) {
         return .{
             .bytes = 1,
             .value = .{
@@ -204,7 +205,17 @@ pub fn PossiblyOwnedSlice(comptime Component: type) type {
 
         pub fn deinit(self: Self) void {
             switch (self) {
-                .owned => |*o| o.allocator.free(o.data),
+                .owned => |*o| {
+                    // deinit each item
+                    if (std.meta.hasFn(Component, "deinit")) {
+                        for (o.data) |item| {
+                            item.deinit();
+                        }
+                    }
+
+                    // free the memory where each item lives
+                    o.allocator.free(o.data);
+                },
                 else => {},
             }
         }
@@ -272,12 +283,12 @@ test "decode string" {
     try std.testing.expectEqualStrings("hello world", decoded.value.constSlice());
 }
 
-pub fn Composite(comptime Pld: type) type {
+pub fn Struct(comptime Pld: type) type {
     return struct {
         pub fn deinit(self: Pld) void {
             inline for (std.meta.fields(Pld)) |field| {
                 if (std.meta.hasFn(field.type, "deinit")) {
-                    defer @field(self, field.name).deinit();
+                    @field(self, field.name).deinit();
                 }
             }
         }
@@ -290,11 +301,15 @@ pub fn Composite(comptime Pld: type) type {
             return totalLength;
         }
 
-        pub fn decode(allocator: std.mem.Allocator, reader: anytype) !Decoded(Pld) {
+        pub fn decode(allocator: std.mem.Allocator, reader: anytype, origBytesLeft: usize) !Decoded(Pld) {
+            var bytesLeft = origBytesLeft;
             var decoded: Pld = undefined;
             var bytesRead: usize = 0;
             inline for (std.meta.fields(Pld)) |field| {
-                @field(decoded, field.name) = (try field.type.decode(allocator, reader)).unbox(&bytesRead);
+                const fieldDecoded: Decoded(field.type) = try field.type.decode(allocator, reader, bytesLeft);
+                bytesRead += fieldDecoded.bytes;
+                bytesLeft -= fieldDecoded.bytes;
+                @field(decoded, field.name) = fieldDecoded.value;
             }
             return .{ .bytes = bytesRead, .value = decoded };
         }
@@ -322,7 +337,7 @@ pub fn Composite(comptime Pld: type) type {
                 if (fields.len > 1) {
                     try writer.writeAll("   ");
                 }
-                try std.fmt.format(writer, "{s} = {},", .{ field.name, @field(self.payload, field.name) });
+                try std.fmt.format(writer, "{s} = {},", .{ field.name, @field(self, field.name) });
                 if (fields.len > 1) {
                     try writer.writeAll("\n");
                 }
@@ -348,7 +363,7 @@ pub fn IntEnum(I: type, Payload: type) type {
             return ctr.length();
         }
 
-        pub fn decode(allocator: std.mem.Allocator, reader: anytype) !Decoded(Self) {
+        pub fn decode(allocator: std.mem.Allocator, reader: anytype, _: usize) !Decoded(Self) {
             var size: usize = 0;
             const decoded: Enum = std.meta.intToEnum((try I.decode(allocator, reader)).unbox(&size)) catch {
                 return error.InvalidEnumVariant;
@@ -382,7 +397,7 @@ pub fn CountedArray(Counter: type, Payload: type) type {
         }
 
         pub fn deinit(self: Self) void {
-            defer self.items.deinit();
+            self.items.deinit();
         }
 
         pub fn length(self: *const Self) usize {
@@ -394,9 +409,13 @@ pub fn CountedArray(Counter: type, Payload: type) type {
             return size;
         }
 
-        pub fn decode(allocator: std.mem.Allocator, reader: anytype) !Decoded(Self) {
+        pub fn decode(allocator: std.mem.Allocator, reader: anytype, origBytesLeft: usize) !Decoded(Self) {
             var bytes: usize = 0;
-            const c: usize = @intCast((try Counter.decode(allocator, reader)).unbox(&bytes).value);
+            var bytesLeft: usize = origBytesLeft;
+            const counterDecoded: Decoded(Counter) = try Counter.decode(allocator, reader, origBytesLeft);
+            bytes += counterDecoded.bytes;
+            bytesLeft -= counterDecoded.bytes;
+            const c: usize = @intCast(counterDecoded.value.value);
 
             var data = try std.ArrayList(Payload).initCapacity(allocator, c);
             defer data.deinit();
@@ -406,7 +425,10 @@ pub fn CountedArray(Counter: type, Payload: type) type {
                 bytes += c;
             } else {
                 for (0..c) |_| {
-                    try data.append((try Payload.decode(allocator, reader)).unbox(&bytes));
+                    const itemDecoded: Decoded(Payload) = try Payload.decode(allocator, reader, bytesLeft);
+                    try data.append(itemDecoded.value);
+                    bytes += itemDecoded.bytes;
+                    bytesLeft -= itemDecoded.bytes;
                 }
             }
 
@@ -446,6 +468,13 @@ pub fn CountedArray(Counter: type, Payload: type) type {
             return self.items.constSlice();
         }
 
+        pub fn borrowed(self: *const Self) Self {
+            return switch (self.items) {
+                .borrowed => self.*,
+                .owned => .init(self.constSlice()),
+            };
+        }
+
         pub fn format(self: Self, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
             if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
             const s = self.constSlice();
@@ -460,6 +489,388 @@ pub fn CountedArray(Counter: type, Payload: type) type {
                 }
                 try writer.writeAll("]");
             }
+        }
+    };
+}
+
+pub fn RestOfPacketArray(Payload: type) type {
+    return struct {
+        items: PossiblyOwnedSlice(Payload),
+
+        const Self = @This();
+
+        pub fn init(items: []const Payload) Self {
+            return .{ .items = .{ .borrowed = items } };
+        }
+
+        pub fn deinit(self: Self) void {
+            self.items.deinit();
+        }
+
+        pub fn length(self: *const Self) usize {
+            var l: usize = 0;
+            for (self.constSlice()) |item| {
+                l += item.length();
+            }
+            return l;
+        }
+
+        pub fn decode(allocator: std.mem.Allocator, reader: anytype, origBytesLeft: usize) !Decoded(Self) {
+            var data = std.ArrayList(Payload).init(allocator);
+            defer data.deinit();
+
+            var bytesRead: usize = 0;
+            if (Payload == u8) {
+                try reader.readNoEof(try data.addManyAsSlice(origBytesLeft));
+                bytesRead += origBytesLeft;
+            } else {
+                var bytesLeft: usize = origBytesLeft;
+                while (bytesLeft > 0) {
+                    const itemDecoded: Decoded(Payload) = try Payload.decode(allocator, reader, bytesLeft);
+                    bytesLeft -= itemDecoded.bytes;
+                    bytesRead += itemDecoded.bytes;
+                    data.append(itemDecoded.value);
+                }
+            }
+
+            return .{
+                .value = .{
+                    .items = .{
+                        .owned = .{
+                            .data = try data.toOwnedSlice(),
+                            .allocator = allocator,
+                        },
+                    },
+                },
+                .bytes = bytesRead,
+            };
+        }
+
+        pub fn encode(self: *const Self, writer: anytype) !usize {
+            var bytes: usize = 0;
+
+            const data = self.constSlice();
+            if (Payload == u8) {
+                try writer.writeAll(data);
+                bytes = data.len;
+            } else {
+                for (data) |item| {
+                    bytes += try item.encode(writer);
+                }
+            }
+
+            return bytes;
+        }
+
+        pub fn borrowed(self: *const Self) Self {
+            return switch (self.items.*) {
+                .borrowed => self.*,
+                .owned => .init(self.constSlice()),
+            };
+        }
+
+        pub fn constSlice(self: *const Self) []const Payload {
+            return self.items.constSlice();
+        }
+
+        pub fn format(self: Self, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+            if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
+            try std.fmt.format(writer, "{}", self.constSlice());
+        }
+    };
+}
+
+pub const RemainingBytes = RestOfPacketArray(u8);
+
+pub const UUID = struct {
+    pub const ByteSize: usize = 16;
+
+    raw: [ByteSize]u8,
+
+    pub fn fromStr(repr: []const u8) !UUID {
+        return .{ .raw = try Parser.parse(repr) };
+    }
+
+    pub fn random(rng: anytype) UUID {
+        var out: UUID = undefined;
+        rng.bytes(&out.raw);
+        out.raw[6] &= 0x0f;
+        out.raw[6] |= 0x40;
+        out.raw[8] &= 0x3f;
+        out.raw[8] |= 0x80;
+        return out;
+    }
+
+    pub fn format(uuid: *const UUID, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        if (fmt.len != 0) std.fmt.invalidFmtError(fmt, uuid);
+        var emitter: Emitter(@TypeOf(writer)) = .{ .raw = &uuid.raw, .writer = writer };
+        try emitter.emit();
+    }
+
+    pub fn length(_: *const UUID) usize {
+        return ByteSize;
+    }
+
+    pub fn encode(uuid: *const UUID, writer: anytype) !usize {
+        try writer.writeAll(&uuid.raw);
+        return ByteSize;
+    }
+
+    pub fn decode(_: std.mem.Allocator, reader: anytype, _: usize) !Decoded(UUID) {
+        var out: UUID = undefined;
+        try reader.readNoEof(&out.raw);
+        return .{ .bytes = ByteSize, .value = out };
+    }
+
+    fn Emitter(Writer: type) type {
+        return struct {
+            raw: []const u8,
+            writer: Writer,
+            hyphens: bool = true,
+
+            const Self = @This();
+
+            fn emit(self: *Self) !void {
+                try self.emitGroup(4);
+                try self.emitHyphen();
+                try self.emitGroup(2);
+                try self.emitHyphen();
+                try self.emitGroup(2);
+                try self.emitHyphen();
+                try self.emitGroup(2);
+                try self.emitHyphen();
+                try self.emitGroup(6);
+            }
+
+            fn emitGroup(self: *Self, bytes: usize) !void {
+                for (0..bytes) |_| {
+                    try self.emitByte();
+                }
+            }
+
+            fn emitHyphen(self: *Self) !void {
+                if (self.hyphens) {
+                    try self.writer.writeByte('-');
+                }
+            }
+
+            fn emitByte(self: *Self) !void {
+                const b = try self.consumeByte();
+                var chars: [2]u8 = undefined;
+                chars[1] = hexCharFor(@intCast(b & 0xF));
+                chars[0] = hexCharFor(@intCast((b >> 4) & 0xF));
+                try self.writer.writeAll(&chars);
+            }
+
+            fn consumeByte(self: *Self) !u8 {
+                if (self.raw.len == 0) {
+                    return error.NotEnoughBytes;
+                } else {
+                    const b = self.raw[0];
+                    self.raw = self.raw[1..];
+                    return b;
+                }
+            }
+
+            fn hexCharFor(hb: u4) u8 {
+                if (hb < 10) {
+                    return @as(u8, @intCast(hb)) + '0';
+                } else {
+                    return @as(u8, @intCast(hb - 10)) + 'a';
+                }
+            }
+        };
+    }
+
+    const Parser = struct {
+        input: []const u8,
+
+        fn parse(input: []const u8) ![16]u8 {
+            var parser: Parser = .{ .input = input };
+            var out: [ByteSize]u8 = undefined;
+            try parser.consumeGroup(out[0..4]);
+            const hasHyphens = try parser.consumeHyphen(true);
+            try parser.consumeGroup(out[4..6]);
+            if (hasHyphens) {
+                _ = try parser.consumeHyphen(false);
+            }
+            try parser.consumeGroup(out[6..8]);
+            if (hasHyphens) {
+                _ = try parser.consumeHyphen(false);
+            }
+            try parser.consumeGroup(out[8..10]);
+            if (hasHyphens) {
+                _ = try parser.consumeHyphen(false);
+            }
+            try parser.consumeGroup(out[10..16]);
+            if (parser.input.len != 0) {
+                return error.ExpectedEOF;
+            }
+            return out;
+        }
+
+        fn consumeGroup(parser: *Parser, dest: []u8) !void {
+            for (dest) |*d| {
+                d.* = try parser.consumeHexByte();
+            }
+        }
+
+        fn consumeHyphen(parser: *Parser, optional: bool) !bool {
+            if (optional) {
+                if (parser.peekChar()) |pc| {
+                    // next char is not a hyphen, but it is a valid hex char
+                    if (pc != '-' and decodeHexChar(pc) != null) {
+                        return false;
+                    }
+                }
+            }
+
+            if ((try parser.consumeChar()) != '-') {
+                return error.ExpectedHyphen;
+            } else {
+                return true;
+            }
+        }
+
+        fn consumeHexByte(parser: *Parser) !u8 {
+            return (@as(u8, @intCast(try parser.consumeHexChar())) << 4) | @as(u8, @intCast(try parser.consumeHexChar()));
+        }
+
+        fn consumeHexChar(parser: *Parser) !u4 {
+            return decodeHexChar(try parser.consumeChar()) orelse error.InvalidHexChar;
+        }
+
+        fn decodeHexChar(c: u8) ?u4 {
+            return switch (c) {
+                '0'...'9' => @intCast(c - '0'),
+                'a'...'f' => @as(u4, @intCast(c - 'a')) + 10,
+                'A'...'F' => @as(u4, @intCast(c - 'A')) + 10,
+                else => null,
+            };
+        }
+
+        fn peekChar(parser: *Parser) ?u8 {
+            if (parser.input.len == 0) {
+                return null;
+            } else {
+                return parser.input[0];
+            }
+        }
+
+        fn consumeChar(parser: *Parser) !u8 {
+            if (parser.input.len == 0) {
+                return error.UnexpectedEof;
+            } else {
+                const out = parser.input[0];
+                parser.input = parser.input[1..];
+                return out;
+            }
+        }
+    };
+};
+
+test "random uuid" {
+    const id0 = UUID.random(std.crypto.random);
+    std.debug.print("id = {}\n", .{id0});
+}
+
+test "parse uuid" {
+    const id0 = try UUID.fromStr("a02c0615-2879-46db-8c4c-e7c7329d98d2");
+    std.debug.print("id = {}\n", .{id0});
+}
+
+test "parse uuid no hyphens" {
+    const id0 = try UUID.fromStr("a02c0615287946db8c4ce7c7329d98d2");
+    std.debug.print("id = {}\n", .{id0});
+}
+
+test "encode uuid" {
+    var buf = std.ArrayList(u8).init(std.testing.allocator);
+    defer buf.deinit();
+
+    const id0 = UUID.random(std.crypto.random);
+    const bytes = try id0.encode(buf.writer());
+    try std.testing.expectEqual(UUID.ByteSize, bytes);
+    try std.testing.expectEqualStrings(&id0.raw, buf.items);
+}
+
+pub fn Optional(Payload: type) type {
+    return union(enum) {
+        some: Payload,
+        none,
+
+        const Self = @This();
+
+        pub fn init(pld: Payload) Self {
+            return .{ .some = pld };
+        }
+
+        pub fn deinit(self: Self) void {
+            if (std.meta.hasFn(Payload, "deinit")) {
+                switch (self) {
+                    .some => |pld| {
+                        pld.deinit();
+                    },
+                    .none => {},
+                }
+            }
+        }
+
+        pub fn encode(self: *const Self, writer: anytype) !usize {
+            var bytes: usize = 0;
+            switch (self.*) {
+                .some => |*pld| {
+                    const craftBool: Bool = .init(true);
+                    bytes += try craftBool.encode(writer);
+                    bytes += try pld.encode(writer);
+                },
+                .none => {
+                    const craftBool: Bool = .init(false);
+                    bytes += try craftBool.encode(writer);
+                },
+            }
+            return bytes;
+        }
+
+        pub fn length(self: *const Self) usize {
+            return Bool.ByteSize + switch (self.*) {
+                .some => |*pld| pld.length(),
+                .none => 0,
+            };
+        }
+
+        pub fn decode(allocator: std.mem.Allocator, reader: anytype, bytesLeftOrig: usize) !Decoded(Self) {
+            var bytesLeft: usize = bytesLeftOrig;
+            var bytes: usize = 0;
+
+            const presentDecoded: Decoded(Bool) = try Bool.decode(allocator, reader, bytesLeft);
+            bytes += presentDecoded.bytes;
+
+            if (presentDecoded.value.value) {
+                bytesLeft -= presentDecoded.bytes;
+
+                const payloadDecoded: Decoded(Payload) = try Payload.decode(allocator, reader, bytesLeft);
+                bytes += payloadDecoded.bytes;
+                bytesLeft -= payloadDecoded.bytes;
+                return .{ .bytes = bytes, .value = .{ .some = payloadDecoded.value } };
+            } else {
+                return .{ .bytes = bytes, .value = .none };
+            }
+        }
+
+        pub fn value(self: anytype) ?@TypeOf(&self.*.some) {
+            return switch (self.*) {
+                .some => |*pld| pld,
+                .none => null,
+            };
+        }
+
+        pub fn format(self: Self, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+            if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
+            try switch (self) {
+                .some => |pld| std.fmt.format(writer, "{}", .{pld}),
+                .none => writer.writeAll("null"),
+            };
         }
     };
 }
