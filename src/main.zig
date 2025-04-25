@@ -167,9 +167,7 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile) 
                 const setCompressionPacket = try loginPacket.decodeAs(allocator, CraftPacket.SetCompressionPacket);
                 defer setCompressionPacket.deinit();
 
-                // unsupported
-                std.debug.print("compression requested ({}), not supported!\n", .{setCompressionPacket});
-                return error.CompressionRequested;
+                try conn.setCompressionThreshold(@intCast(setCompressionPacket.threshold.value));
             },
             0x04 => {
                 // login plugin message

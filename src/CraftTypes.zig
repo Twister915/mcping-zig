@@ -52,7 +52,7 @@ fn VarNum(comptime Bits: u16) type {
 
         pub fn length(self: *const Self) usize {
             const bitsRequired: u16 = Bits - @clz(self.value);
-            const bytesRequired: usize = @intCast(std.math.divCeil(u16, bitsRequired, 7));
+            const bytesRequired: usize = @intCast(std.math.divCeil(u16, bitsRequired, 7) catch unreachable);
             if (bytesRequired == 0) {
                 return 1;
             } else {
