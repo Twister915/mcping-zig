@@ -190,7 +190,7 @@ pub const Bool = struct {
     }
 };
 
-fn PossiblyOwnedSlice(comptime Component: type) type {
+pub fn PossiblyOwnedSlice(comptime Component: type) type {
     const Owned = struct {
         data: []Component,
         allocator: std.mem.Allocator,
@@ -272,82 +272,46 @@ test "decode string" {
     try std.testing.expectEqualStrings("hello world", decoded.value.constSlice());
 }
 
-pub fn Composite(comptime Payload: type) type {
+pub fn Composite(comptime Pld: type) type {
     return struct {
-        payload: Payload,
-
-        const Self = @This();
-
-        pub fn init(payload: Payload) Self {
-            return .{ .payload = payload };
-        }
-
-        pub fn deinit(self: Self) void {
-            if (std.meta.hasFn(Payload, "deinit")) {
-                defer self.payload.deinit();
-            } else {
-                inline for (std.meta.fields(Payload)) |field| {
-                    if (std.meta.hasFn(field.type, "deinit")) {
-                        defer @field(self.payload, field.name).deinit();
-                    }
+        pub fn deinit(self: Pld) void {
+            inline for (std.meta.fields(Pld)) |field| {
+                if (std.meta.hasFn(field.type, "deinit")) {
+                    defer @field(self, field.name).deinit();
                 }
             }
         }
 
-        pub fn length(self: *const Self) usize {
-            if (std.meta.hasFn(Payload, "length")) {
-                return self.payload.length();
-            } else {
-                var totalLength: usize = 0;
-                inline for (std.meta.fields(Payload)) |field| {
-                    if (std.meta.hasFn(field.type, "length")) {
-                        totalLength += @field(self.payload, field.name).length();
-                    } else {
-                        @compileError("Field does not have length method... " ++ field.name);
-                    }
-                }
-                return totalLength;
+        pub fn length(self: *const Pld) usize {
+            var totalLength: usize = 0;
+            inline for (std.meta.fields(Pld)) |field| {
+                totalLength += @field(self, field.name).length();
             }
+            return totalLength;
         }
 
-        pub fn decode(allocator: std.mem.Allocator, reader: anytype) !Decoded(Self) {
-            if (std.meta.hasFn(Payload, "decode")) {
-                return Payload.decode(allocator, reader);
-            } else {
-                var payload: Payload = undefined;
-                var totalSize: usize = 0;
-                inline for (std.meta.fields(Payload)) |field| {
-                    if (std.meta.hasFn(field.type, "decode")) {
-                        @field(payload, field.name) = (try field.type.decode(allocator, reader)).unbox(&totalSize);
-                    } else {
-                        @compileError("Field does not have decode method... " ++ field.name);
-                    }
-                }
-                return .{ .value = .{ .payload = payload }, .bytes = totalSize };
+        pub fn decode(allocator: std.mem.Allocator, reader: anytype) !Decoded(Pld) {
+            var decoded: Pld = undefined;
+            var bytesRead: usize = 0;
+            inline for (std.meta.fields(Pld)) |field| {
+                @field(decoded, field.name) = (try field.type.decode(allocator, reader)).unbox(&bytesRead);
             }
+            return .{ .bytes = bytesRead, .value = decoded };
         }
 
-        pub fn encode(self: *const Self, writer: anytype) !usize {
-            if (std.meta.hasFn(Payload, "encode")) {
-                return self.payload.encode(writer);
-            } else {
-                var totalSize: usize = 0;
-                inline for (std.meta.fields(Payload)) |field| {
-                    if (std.meta.hasFn(field.type, "encode")) {
-                        totalSize += try @field(self.payload, field.name).encode(writer);
-                    } else {
-                        @compileError("Field does not have encode method... " ++ field.name);
-                    }
-                }
-                return totalSize;
+        pub fn encode(self: *const Pld, writer: anytype) !usize {
+            var totalSize: usize = 0;
+            inline for (std.meta.fields(Pld)) |field| {
+                totalSize += try @field(self, field.name).encode(writer);
             }
+            return totalSize;
         }
 
-        pub fn format(self: Self, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        pub fn format(self: Pld, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
             if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
 
             try writer.writeAll("{");
-            const fields = std.meta.fields(Payload);
+            const fields = std.meta.fields(Pld);
             if (fields.len > 1) {
                 try writer.writeAll("\n");
             } else {

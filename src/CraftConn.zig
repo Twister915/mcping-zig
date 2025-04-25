@@ -49,7 +49,6 @@ pub fn readPacket(conn: *Conn) !CraftTypes.Decoded(ReadPkt) {
     bytes += bodyLength;
 
     const packetIdDecoded = try CraftTypes.VarInt.decode(conn.allocator, reader);
-    defer packetIdDecoded.deinit(); // basically a no-op
     bodyLength -= packetIdDecoded.bytes;
 
     const body = try conn.buf.addManyAsSlice(bodyLength);
@@ -65,8 +64,8 @@ pub fn readPacket(conn: *Conn) !CraftTypes.Decoded(ReadPkt) {
     };
 }
 
-pub fn writePacket(id: CraftTypes.VarInt, conn: *Conn, comptime T: type, packet: T) !usize {
-    if (std.meta.hasFn(T, "deinit")) {
+pub fn writePacket(conn: *Conn, id: CraftTypes.VarInt, packet: anytype) !usize {
+    if (std.meta.hasFn(@TypeOf(packet), "deinit")) {
         defer packet.deinit();
     }
 
