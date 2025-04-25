@@ -116,7 +116,7 @@ fn VarNum(comptime Bits: u16) type {
 pub const VarInt = VarNum(32);
 pub const VarLong = VarNum(64);
 
-fn CraftInt(i: type) type {
+fn CraftInt(comptime i: type) type {
     return struct {
         value: Int,
 
@@ -347,7 +347,10 @@ pub fn Struct(comptime Pld: type) type {
     };
 }
 
-pub fn IntEnum(I: type, Payload: type) type {
+pub fn IntEnum(
+    comptime I: type,
+    comptime Payload: type,
+) type {
     return struct {
         value: Enum,
 
@@ -386,7 +389,10 @@ pub fn IntEnum(I: type, Payload: type) type {
     };
 }
 
-pub fn CountedArray(Counter: type, Payload: type) type {
+pub fn CountedArray(
+    comptime Counter: type,
+    comptime Payload: type,
+) type {
     return struct {
         items: PossiblyOwnedSlice(Payload),
 
@@ -493,7 +499,7 @@ pub fn CountedArray(Counter: type, Payload: type) type {
     };
 }
 
-pub fn RestOfPacketArray(Payload: type) type {
+pub fn RestOfPacketArray(comptime Payload: type) type {
     return struct {
         items: PossiblyOwnedSlice(Payload),
 
@@ -794,7 +800,7 @@ test "encode uuid" {
     try std.testing.expectEqualStrings(&id0.raw, buf.items);
 }
 
-pub fn Optional(Payload: type) type {
+pub fn Optional(comptime Payload: type) type {
     return union(enum) {
         some: Payload,
         none,
