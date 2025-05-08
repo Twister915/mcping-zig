@@ -1,37 +1,6 @@
-pub const MAX_PACKET_SIZE: usize = 0x80000000;
-
 const std = @import("std");
 
-pub const VarInt = enum(i32) {
-    _,
-
-    pub usingnamespace AutoVarNum(@This());
-};
-pub const VarLong = enum(i64) {
-    _,
-
-    pub usingnamespace AutoVarNum(@This());
-};
-
-fn AutoVarNum(comptime Wrapper: type) type {
-    return struct {
-        pub const Int = @typeInfo(Wrapper).@"enum".tag_type;
-        pub const IntBits = @typeInfo(Int).int.bits;
-        pub const ByteSize = std.math.divCeil(usize, IntBits, 7) catch unreachable;
-
-        pub fn craftEncode(data: Wrapper, writer: anytype) !usize {
-            return encodeVarnum(@intFromEnum(data), writer);
-        }
-
-        pub fn craftDecode(reader: anytype, _: std.mem.Allocator) !Decoded(Wrapper) {
-            return decodeVarnum(Wrapper, reader);
-        }
-
-        pub fn length(value: Wrapper) usize {
-            return @max(1, std.math.divCeil(usize, @as(usize, @intCast(@typeInfo(Int).int.bits)) - @clz(@intFromEnum(value)), 7) catch unreachable);
-        }
-    };
-}
+pub const MAX_PACKET_SIZE: usize = 0x80000000;
 
 pub fn encode(data: anytype, writer: anytype) !usize {
     const Data = @TypeOf(data);
@@ -90,6 +59,44 @@ pub fn decode(comptime Data: type, reader: anytype, allocator: std.mem.Allocator
     };
 }
 
+pub const VarInt = enum(i32) {
+    _,
+
+    pub usingnamespace AutoVarNum(@This());
+};
+pub const VarLong = enum(i64) {
+    _,
+
+    pub usingnamespace AutoVarNum(@This());
+};
+
+fn AutoVarNum(comptime Wrapper: type) type {
+    return struct {
+        pub const Int = @typeInfo(Wrapper).@"enum".tag_type;
+        pub const BIT_SIZE = @typeInfo(Int).int.bits;
+        pub const BYTE_SIZE = std.math.divCeil(usize, BIT_SIZE, 7) catch unreachable;
+
+        pub fn craftEncode(data: Wrapper, writer: anytype) !usize {
+            return encodeVarnum(@intFromEnum(data), writer);
+        }
+
+        pub fn craftDecode(reader: anytype, _: std.mem.Allocator) !Decoded(Wrapper) {
+            return decodeVarnum(Wrapper, reader);
+        }
+
+        pub fn length(value: Wrapper) usize {
+            return @max(
+                1,
+                std.math.divCeil(
+                    usize,
+                    @as(usize, @intCast(BIT_SIZE)) - @clz(@intFromEnum(value)),
+                    7,
+                ) catch unreachable,
+            );
+        }
+    };
+}
+
 // "var num" such as VarInt, VarLong
 fn encodeVarnum(data: anytype, writer: anytype) !usize {
     const VarNumType = comptime @TypeOf(data);
@@ -101,12 +108,12 @@ fn encodeVarnum(data: anytype, writer: anytype) !usize {
     while (true) {
         var b: u8 = @intCast(to_encode & 0x7F);
         to_encode >>= 7;
-        const hasMore = to_encode != 0;
-        if (hasMore) {
+        const has_more = to_encode != 0;
+        if (has_more) {
             b |= 0x80;
         }
         bytes += try encode(b, writer);
-        if (!hasMore) {
+        if (!has_more) {
             return bytes;
         } else if (bytes >= MAX_BYTES) {
             return error.VarNumTooLarge;
@@ -551,13 +558,13 @@ pub fn Cow(comptime Payload: type) type {
         }
 
         pub fn craftDecode(reader: anytype, allocator: std.mem.Allocator) !Decoded(Ctr) {
-            const ownedPtr: *Payload = try allocator.create(Payload);
+            const owned_ptr: *Payload = try allocator.create(Payload);
             const dcd = try decode(Payload, reader, allocator);
-            ownedPtr.* = dcd.value;
+            owned_ptr.* = dcd.value;
             return .{
                 .value = .{
                     .owned = .{
-                        .ptr = ownedPtr,
+                        .ptr = owned_ptr,
                         .allocator = allocator,
                     },
                 },
@@ -678,16 +685,16 @@ pub fn LengthPrefixed(comptime Counter: type, comptime Payload: type) type {
 pub const String = LengthPrefixed(VarInt, u8);
 
 test "encode string" {
-    const testData = "hello world";
+    const test_data = "hello world";
 
-    const craftStr = String.init(testData);
-    defer craftStr.deinit();
+    const craft_str = String.init(test_data);
+    defer craft_str.deinit();
 
     var buf = std.ArrayList(u8).init(std.testing.allocator);
     defer buf.deinit();
 
-    const bytesWritten = try encode(craftStr, buf.writer());
-    try std.testing.expectEqual(testData.len + 1, bytesWritten);
+    const bytes_written = try encode(craft_str, buf.writer());
+    try std.testing.expectEqual(test_data.len + 1, bytes_written);
     try std.testing.expectEqualSlices(u8, &.{
         0x0B, // 11
         0x68, 0x65, 0x6C, 0x6C, 0x6F, // hello
@@ -697,19 +704,19 @@ test "encode string" {
 }
 
 test "decode string" {
-    const testData: []const u8 = &.{
+    const test_data: []const u8 = &.{
         0x0B, // 11
         0x68, 0x65, 0x6C, 0x6C, 0x6F, // hello
         0x20, // space
         0x77, 0x6F, 0x72, 0x6C, 0x64, // world
     };
 
-    var stream = std.io.fixedBufferStream(testData);
+    var stream = std.io.fixedBufferStream(test_data);
     const decoded = try decode(String, stream.reader(), std.testing.allocator);
-    const strCow = decoded.value;
-    defer strCow.deinit();
-    try std.testing.expectEqual(testData.len, decoded.bytes_read);
-    const str: []const u8 = strCow.constSlice();
+    const str_cow = decoded.value;
+    defer str_cow.deinit();
+    try std.testing.expectEqual(test_data.len, decoded.bytes_read);
+    const str: []const u8 = str_cow.constSlice();
     try std.testing.expectEqualStrings("hello world", str);
 }
 
@@ -772,15 +779,15 @@ test "string enum" {
     const v: NameTagVisibility = .hideForOtherTeams;
     _ = try encode(v, buf.writer());
 
-    var readerStream = std.io.fixedBufferStream(buf.items);
-    const decoded: NameTagVisibility = (try decode(NameTagVisibility, readerStream.reader(), std.testing.allocator)).unwrap(null);
+    var reader_stream = std.io.fixedBufferStream(buf.items);
+    const decoded: NameTagVisibility = (try decode(NameTagVisibility, reader_stream.reader(), std.testing.allocator)).unwrap(null);
     try std.testing.expectEqual(v, decoded);
 }
 
 pub const UUID = struct {
-    pub const ByteSize: usize = 16;
+    pub const NUM_BYTES: usize = 16;
 
-    raw: [ByteSize]u8,
+    raw: [NUM_BYTES]u8,
 
     pub fn fromStr(repr: []const u8) !UUID {
         return .{ .raw = try Parser.parse(repr) };
@@ -802,19 +809,15 @@ pub const UUID = struct {
         try emitter.emit();
     }
 
-    pub fn length(_: *const UUID) usize {
-        return ByteSize;
-    }
-
     pub fn craftEncode(uuid: UUID, writer: anytype) !usize {
         try writer.writeAll(&uuid.raw);
-        return ByteSize;
+        return NUM_BYTES;
     }
 
     pub fn craftDecode(reader: anytype, _: std.mem.Allocator) !Decoded(UUID) {
         var out: UUID = undefined;
         try reader.readNoEof(&out.raw);
-        return .{ .bytes_read = ByteSize, .value = out };
+        return .{ .bytes_read = NUM_BYTES, .value = out };
     }
 
     fn Emitter(Writer: type) type {
@@ -882,19 +885,19 @@ pub const UUID = struct {
 
         fn parse(input: []const u8) ![16]u8 {
             var parser: Parser = .{ .input = input };
-            var out: [ByteSize]u8 = undefined;
+            var out: [NUM_BYTES]u8 = undefined;
             try parser.consumeGroup(out[0..4]);
-            const hasHyphens = try parser.consumeHyphen(true);
+            const has_hyphens = try parser.consumeHyphen(true);
             try parser.consumeGroup(out[4..6]);
-            if (hasHyphens) {
+            if (has_hyphens) {
                 _ = try parser.consumeHyphen(false);
             }
             try parser.consumeGroup(out[6..8]);
-            if (hasHyphens) {
+            if (has_hyphens) {
                 _ = try parser.consumeHyphen(false);
             }
             try parser.consumeGroup(out[8..10]);
-            if (hasHyphens) {
+            if (has_hyphens) {
                 _ = try parser.consumeHyphen(false);
             }
             try parser.consumeGroup(out[10..16]);
@@ -985,7 +988,7 @@ test "encode uuid" {
 
     const id0 = UUID.random(std.crypto.random);
     const bytes = try id0.encode(buf.writer());
-    try std.testing.expectEqual(UUID.ByteSize, bytes);
+    try std.testing.expectEqual(UUID.NUM_BYTES, bytes);
     try std.testing.expectEqualStrings(&id0.raw, buf.items);
 }
 

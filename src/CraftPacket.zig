@@ -6,7 +6,7 @@ pub const HandshakingPacket = struct {
     version: CraftTypes.VarInt,
     address: CraftTypes.String,
     port: u16,
-    nextState: enum(i32) {
+    next_state: enum(i32) {
         status = 1,
         login = 2,
         transfer = 3,
@@ -65,15 +65,15 @@ pub const DisconnectPacket = struct {
 };
 
 pub const EncryptionRequestPacket = struct {
-    serverId: CraftTypes.String,
-    publicKey: CraftTypes.String, // bytes
-    verifyToken: CraftTypes.String, // bytes
-    shouldAuthenticate: bool,
+    server_id: CraftTypes.String,
+    public_key: CraftTypes.String, // bytes
+    verify_token: CraftTypes.String, // bytes
+    should_authenticate: bool,
 
     pub fn deinit(self: @This()) void {
-        self.serverId.deinit();
-        self.publicKey.deinit();
-        self.verifyToken.deinit();
+        self.server_id.deinit();
+        self.public_key.deinit();
+        self.verify_token.deinit();
     }
 };
 
@@ -107,7 +107,7 @@ pub const SetCompressionPacket = struct {
 };
 
 pub const LoginPluginRequestPacket = struct {
-    messageId: CraftTypes.VarInt,
+    message_id: CraftTypes.VarInt,
     channel: CraftTypes.String, // identifer
     data: CraftTypes.RemainingBytes,
 
@@ -145,7 +145,7 @@ pub const LoginEncryptionResponsePacket = struct {
 };
 
 pub const LoginPluginResponsePacket = struct {
-    messageId: CraftTypes.VarInt,
+    message_id: CraftTypes.VarInt,
     data: ?CraftTypes.RemainingBytes,
 
     pub fn deinit(self: @This()) void {
