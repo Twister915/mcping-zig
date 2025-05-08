@@ -53,8 +53,8 @@ pub const ReadPkt = struct {
     pub fn decodeAs(self: Self, allocator: std.mem.Allocator, comptime T: type) !T {
         var stream = std.io.fixedBufferStream(self.data);
         const expectedLen = self.data.len;
-        const decoded: CraftTypes.Decoded(T) = try T.decode(allocator, stream.reader(), expectedLen);
-        if (decoded.bytes != expectedLen) {
+        const decoded: CraftTypes.Decoded(T) = try CraftTypes.decode(T, stream.reader(), allocator);
+        if (decoded.bytes_read != expectedLen) {
             return error.PacketNotCompletelyParsed;
         }
         return decoded.value;
@@ -65,14 +65,14 @@ pub fn readPacket(conn: *Conn) !ReadPkt {
     conn.clearBuffers();
 
     const reader = conn.reader.reader();
-    const pktLength: usize = @intCast((try CraftTypes.VarInt.decode(conn.allocator, reader, 0)).value.value);
+    const pktLength: usize = @intCast(@intFromEnum((try CraftTypes.decode(CraftTypes.VarInt, reader, conn.allocator)).value));
 
     var idAndBody: []u8 = undefined;
     switch (conn.compression) {
         .enabled => |*compress| {
-            const dataLengthDecoded = try CraftTypes.VarInt.decode(conn.allocator, reader, pktLength);
-            const dataLength: usize = @intCast(dataLengthDecoded.value.value);
-            const bytesLeft = pktLength - dataLengthDecoded.bytes;
+            const dataLengthDecoded = try CraftTypes.decode(CraftTypes.VarInt, reader, conn.allocator);
+            const dataLength: usize = @intCast(@intFromEnum(dataLengthDecoded.value));
+            const bytesLeft = pktLength - dataLengthDecoded.bytes_read;
             if (dataLength == 0) {
                 // packet is not compressed, just read it into the buffer
                 idAndBody = try conn.buf.addManyAsSlice(bytesLeft);
@@ -99,20 +99,16 @@ pub fn readPacket(conn: *Conn) !ReadPkt {
 
     var idBodyStream = std.io.fixedBufferStream(idAndBody);
     const idBodyReader = idBodyStream.reader();
-    const packetIdDecoded = try CraftTypes.VarInt.decode(conn.allocator, idBodyReader, idAndBody.len);
+    const packetIdDecoded = try CraftTypes.decode(CraftTypes.VarInt, idBodyReader, conn.allocator);
     return .{
         .id = packetIdDecoded.value,
-        .data = idAndBody[packetIdDecoded.bytes..],
+        .data = idAndBody[packetIdDecoded.bytes_read..],
     };
 }
 
-pub fn writePacket(conn: *Conn, id: CraftTypes.VarInt, packet: anytype) !usize {
+pub fn writePacket(conn: *Conn, id: CraftTypes.VarInt.Int, packet: anytype) !usize {
     if (std.meta.hasFn(@TypeOf(packet), "deinit")) {
         defer packet.deinit();
-    }
-
-    if (!std.meta.hasFn(@TypeOf(packet), "encode")) {
-        @compileError("packet type " ++ @typeName(@TypeOf(packet)) ++ " does not have encode method");
     }
 
     // clear buffers
@@ -140,12 +136,12 @@ pub fn writePacket(conn: *Conn, id: CraftTypes.VarInt, packet: anytype) !usize {
     const packetDataOffset = conn.buf.items.len;
     const writer = conn.buf.writer();
     // encode the packet ID
-    _ = try id.encode(writer);
+    _ = try CraftTypes.encode(@as(CraftTypes.VarInt, @enumFromInt(id)), writer);
     // encode the packet payload
-    _ = try packet.encode(writer);
+    _ = try CraftTypes.encode(packet, writer);
 
     const packetData = conn.buf.items[packetDataOffset..];
-    var dataLength = CraftTypes.VarInt.init(@intCast(packetData.len));
+    var dataLength: CraftTypes.VarInt = @enumFromInt(packetData.len);
 
     // all cases in the switch statement below overwrite this undefined initial state
     // !! it would be UB if any branch of the switch did not set this to something !!
@@ -168,7 +164,7 @@ pub fn writePacket(conn: *Conn, id: CraftTypes.VarInt, packet: anytype) !usize {
                 const dataLengthBytes = dataLength.length();
 
                 // length = the packet length (dataLength + compressed data)
-                const length = CraftTypes.VarInt.init(@intCast(compressedSize + dataLengthBytes));
+                const length: CraftTypes.VarInt = @enumFromInt(compressedSize + dataLengthBytes);
 
                 // we reserved 10 bytes in c.buf earlier, which can be used for encoding length and data length
                 // so now, we can create a writer which will allow us to encode to that region of memory
@@ -177,8 +173,8 @@ pub fn writePacket(conn: *Conn, id: CraftTypes.VarInt, packet: anytype) !usize {
 
                 // encode the two numbers to that space
                 var bytesUsed: usize = 0;
-                bytesUsed += try length.encode(w);
-                bytesUsed += try dataLength.encode(w);
+                bytesUsed += try CraftTypes.encode(length, w);
+                bytesUsed += try CraftTypes.encode(dataLength, w);
 
                 // shift the numbers so they start immediately before the compressed packet data
                 const startIdx = (CraftTypes.VarInt.ByteSize * 2) - bytesUsed;
@@ -209,11 +205,11 @@ pub fn writePacket(conn: *Conn, id: CraftTypes.VarInt, packet: anytype) !usize {
                 //
                 // currently, dataLength refers to the byte size of packet id + packet body, so all we need to add
                 // is the length of encoding a data length of "0" (which is 1 byte)
-                dataLength.value += 1;
+                dataLength = @enumFromInt(@intFromEnum(dataLength) + 1);
 
                 // write this data length before the packet data
                 var prefixStream = std.io.fixedBufferStream(conn.buf.items[0..CraftTypes.VarInt.ByteSize]);
-                const lBytes = try dataLength.encode(prefixStream.writer());
+                const lBytes = try CraftTypes.encode(dataLength, prefixStream.writer());
 
                 // copy the VarInt forward so it starts at the right position
                 const startIdx = CraftTypes.VarInt.ByteSize - lBytes;
@@ -235,7 +231,7 @@ pub fn writePacket(conn: *Conn, id: CraftTypes.VarInt, packet: anytype) !usize {
             //
             // we reserved 5 bytes earlier for this purpose
             var prefixStream = std.io.fixedBufferStream(conn.buf.items[0..CraftTypes.VarInt.ByteSize]);
-            const lBytes = try dataLength.encode(prefixStream.writer());
+            const lBytes = try CraftTypes.encode(dataLength, prefixStream.writer());
 
             // shift the length so that it starts right before the packet data
             const startIdx = CraftTypes.VarInt.ByteSize - lBytes;

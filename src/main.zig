@@ -79,7 +79,7 @@ const Profile = struct {
 };
 
 const PingResponse = struct {
-    status: CraftTypes.PossiblyOwnedSlice(u8),
+    status: CraftTypes.CowSlice(u8),
     latencyMs: ?i64 = null,
 
     const Self = @This();
@@ -93,22 +93,22 @@ fn ping(allocator: std.mem.Allocator, target: Target) !PingResponse {
     var conn = try CraftConn.connect(allocator, target.host, target.port);
     defer conn.deinit();
 
-    _ = try conn.writePacket(.init(0x00), CraftPacket.HandshakingPacket{
-        .version = .init(target.protocolVersion),
+    _ = try conn.writePacket(0x00, CraftPacket.HandshakingPacket{
+        .version = @enumFromInt(target.protocolVersion),
         .address = .init(target.host),
-        .port = .init(target.port),
-        .nextState = .init(.status),
+        .port = target.port,
+        .nextState = .status,
     });
 
-    _ = try conn.writePacket(.init(0x00), CraftPacket.EmptyPacket{});
+    _ = try conn.writePacket(0x00, .{});
     const status = (try (try conn.readPacket()).decodeAs(allocator, CraftPacket.StatusResponsePacket)).status.items;
 
     const pingAtMs = std.time.milliTimestamp();
-    _ = try conn.writePacket(.init(0x01), CraftPacket.StatusPingPongPacket{
-        .timestamp = .init(pingAtMs),
+    _ = try conn.writePacket(0x01, CraftPacket.StatusPingPongPacket{
+        .timestamp = pingAtMs,
     });
 
-    const pongTs = (try (try conn.readPacket()).decodeAs(allocator, CraftPacket.StatusPingPongPacket)).timestamp.value;
+    const pongTs = (try (try conn.readPacket()).decodeAs(allocator, CraftPacket.StatusPingPongPacket)).timestamp;
     var out: PingResponse = .{ .status = status };
     if (pongTs == pingAtMs) {
         const pongRcvAt = std.time.milliTimestamp();
@@ -121,24 +121,24 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile) 
     var conn = try CraftConn.connect(allocator, target.host, target.port);
     defer conn.deinit();
     // state = handshaking
-    _ = try conn.writePacket(.init(0x00), CraftPacket.HandshakingPacket{
+    _ = try conn.writePacket(0x00, CraftPacket.HandshakingPacket{
         .address = .init(target.host),
-        .port = .init(target.port),
-        .version = .init(target.protocolVersion),
-        .nextState = .init(.login),
+        .port = target.port,
+        .version = @enumFromInt(target.protocolVersion),
+        .nextState = .login,
     });
 
     // state = login
 
     // 0x00 LoginStart client ----> server
-    _ = try conn.writePacket(.init(0x00), CraftPacket.LoginStartPacket{
+    _ = try conn.writePacket(0x00, CraftPacket.LoginStartPacket{
         .name = .init(profile.username),
         .uuid = profile.uuid,
     });
 
     login_state: while (true) {
         const loginPacket = try conn.readPacket();
-        switch (loginPacket.id.value) {
+        switch (@intFromEnum(loginPacket.id)) {
             0x00 => {
                 const disconnectPacket = try loginPacket.decodeAs(allocator, CraftPacket.DisconnectPacket);
                 defer disconnectPacket.deinit();
@@ -160,15 +160,14 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile) 
                 defer loginSuccessPacket.deinit();
 
                 // send login acknowledged
-                _ = try conn.writePacket(.init(0x03), CraftPacket.EmptyPacket{});
+                _ = try conn.writePacket(0x03, .{});
                 break :login_state;
             },
             0x03 => {
                 // set compression
                 const setCompressionPacket = try loginPacket.decodeAs(allocator, CraftPacket.SetCompressionPacket);
-                defer setCompressionPacket.deinit();
 
-                try conn.setCompressionThreshold(@intCast(setCompressionPacket.threshold.value));
+                try conn.setCompressionThreshold(@intCast(@intFromEnum(setCompressionPacket.threshold)));
             },
             0x04 => {
                 // login plugin message
@@ -185,9 +184,9 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile) 
                 defer pluginRequestPacket.deinit();
 
                 // login plugin response = 0x02
-                _ = try conn.writePacket(.init(0x02), CraftPacket.LoginPluginResponsePacket{
+                _ = try conn.writePacket(0x02, CraftPacket.LoginPluginResponsePacket{
                     .messageId = pluginRequestPacket.messageId,
-                    .data = .none,
+                    .data = .EMPTY,
                 });
             },
             0x05 => {
@@ -197,9 +196,9 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile) 
                 const cookieRequestPacket = try loginPacket.decodeAs(allocator, CraftPacket.LoginCookieRequestPacket);
                 defer cookieRequestPacket.deinit();
 
-                _ = try conn.writePacket(.init(0x04), CraftPacket.LoginCookieResponsePacket{
-                    .key = cookieRequestPacket.key.borrowed(), // borrow so we don't deinit twice
-                    .payload = .none,
+                _ = try conn.writePacket(0x04, CraftPacket.LoginCookieResponsePacket{
+                    .key = cookieRequestPacket.key.borrow(), // borrow so we don't deinit twice
+                    .payload = .EMPTY,
                 });
             },
             else => |otherId| {

@@ -1,250 +1,681 @@
+pub const MAX_PACKET_SIZE: usize = 0x80000000;
+
 const std = @import("std");
 
-// container for values which were decoded from a decode function
-//
-// returns the value which was decoded and how many bytes were read for that value
-//
-pub fn Decoded(comptime Target: type) type {
+pub const VarInt = enum(i32) {
+    _,
+
+    pub usingnamespace AutoVarNum(@This());
+};
+pub const VarLong = enum(i64) {
+    _,
+
+    pub usingnamespace AutoVarNum(@This());
+};
+
+fn AutoVarNum(comptime Wrapper: type) type {
     return struct {
-        value: Target,
-        bytes: usize,
+        pub const Int = @typeInfo(Wrapper).@"enum".tag_type;
+        pub const IntBits = @typeInfo(Int).int.bits;
+        pub const ByteSize = std.math.divCeil(usize, IntBits, 7) catch unreachable;
 
-        const Self = @This();
-
-        // potentially calls into deinit of the value
-        pub fn deinit(self: Self) void {
-            if (std.meta.hasFn(Target, "deinit")) {
-                self.value.deinit();
-            }
+        pub fn craftEncode(data: Wrapper, writer: anytype) !usize {
+            return encodeVarnum(@intFromEnum(data), writer);
         }
 
-        // quickly get the value out of this Decoded struct, optionally counting the bytes
-        // in the passed ptr
-        pub fn unbox(self: Self, sizeCounter: ?*usize) Target {
-            if (sizeCounter) |ptr| {
-                ptr.* += self.bytes;
+        pub fn craftDecode(reader: anytype, _: std.mem.Allocator) !Decoded(Wrapper) {
+            return decodeVarnum(Wrapper, reader);
+        }
+
+        pub fn length(value: Wrapper) usize {
+            return @max(1, std.math.divCeil(usize, @as(usize, @intCast(@typeInfo(Int).int.bits)) - @clz(@intFromEnum(value)), 7) catch unreachable);
+        }
+    };
+}
+
+pub fn encode(data: anytype, writer: anytype) !usize {
+    const Data = @TypeOf(data);
+    if (std.meta.hasFn(Data, "craftEncode")) {
+        return data.craftEncode(writer);
+    }
+
+    if (Data == u8) {
+        try writer.writeByte(data);
+        return 1;
+    }
+
+    if (@sizeOf(Data) == 0) {
+        return 0;
+    }
+
+    return switch (@typeInfo(Data)) {
+        .int => encodeInt(data, writer),
+        .bool => encode(@as(u8, if (data) 1 else 0), writer),
+        .float => encodeFloat(data, writer),
+        .pointer => |Ptr| encodePointer(Ptr, data, writer),
+        .@"struct" => |S| encodeStruct(S, data, writer),
+        .array => |A| encodeArray(A, data, writer),
+        .optional => encodeOptional(data, writer),
+        .@"enum" => |E| encodeEnum(E, data, writer),
+        else => @compileError(@typeName(Data) ++ " cannot be craft encoded"),
+    };
+}
+
+pub fn decode(comptime Data: type, reader: anytype, allocator: std.mem.Allocator) !Decoded(Data) {
+    if (std.meta.hasFn(Data, "craftDecode")) {
+        return Data.craftDecode(reader, allocator);
+    }
+
+    if (Data == u8) {
+        return .{
+            .value = try reader.readByte(),
+            .bytes_read = 1,
+        };
+    }
+
+    if (@sizeOf(Data) == 0) {
+        return 0;
+    }
+
+    return switch (@typeInfo(Data)) {
+        .int => decodeInt(Data, reader),
+        .bool => decodeBool(reader),
+        .float => decodeFloat(Data, reader),
+        .pointer => |Ptr| decodePointer(Ptr, Data, reader, allocator),
+        .@"struct" => |S| decodeStruct(S, Data, reader, allocator),
+        .array => |A| decodeArray(A, Data, reader, allocator),
+        .optional => |Opt| decodeOptional(Opt, Data, reader, allocator),
+        .@"enum" => |E| decodeEnum(E, Data, reader, allocator),
+        else => @compileError(@typeName(Data) ++ " cannot be craft decoded"),
+    };
+}
+
+// "var num" such as VarInt, VarLong
+fn encodeVarnum(data: anytype, writer: anytype) !usize {
+    const VarNumType = comptime @TypeOf(data);
+    const NUM_BITS = comptime @bitSizeOf(VarNumType);
+    const MAX_BYTES = comptime std.math.divCeil(usize, NUM_BITS, 7) catch unreachable;
+
+    var to_encode = data;
+    var bytes: usize = 0;
+    while (true) {
+        var b: u8 = @intCast(to_encode & 0x7F);
+        to_encode >>= 7;
+        const hasMore = to_encode != 0;
+        if (hasMore) {
+            b |= 0x80;
+        }
+        bytes += try encode(b, writer);
+        if (!hasMore) {
+            return bytes;
+        } else if (bytes >= MAX_BYTES) {
+            return error.VarNumTooLarge;
+        }
+    }
+}
+
+// for an int type such as u16, i16, u32, i32, etc... let's just write it as big endian on the wire
+fn encodeInt(data: anytype, writer: anytype) !usize {
+    // all of this is calculated at comptime
+    const Int = comptime @TypeOf(data);
+    const NUM_BITS = comptime @bitSizeOf(Int);
+    const BYTES = comptime std.math.divExact(usize, NUM_BITS, 8) catch @compileError(@typeName(Int) ++ " is not byte sized (divisible by 8), cannot encode");
+
+    try writer.writeInt(Int, data, .big);
+
+    return BYTES;
+}
+
+fn encodeFloat(data: anytype, writer: anytype) !usize {
+    // inspect the float passed to us... determine it's type
+    const Float = comptime @TypeOf(data);
+    const NUM_BITS = comptime @bitSizeOf(Float);
+
+    // craft protocol defined to only work for "float" and "double" aka f32, f64
+    comptime {
+        switch (NUM_BITS) {
+            32 => {},
+            64 => {},
+            else => @compileError("craft protocol only supports f32 and f64, refusing to serialize"),
+        }
+    }
+
+    // compute an equiv unsigned integer type so we can do a bit cast
+    // for example, f32 becomes AsInt=u32, f64 becomes AsInt=u64
+    const AsInt: type = comptime @Type(.{ .int = .{
+        .bits = NUM_BITS,
+        .signedness = .unsigned,
+    } });
+
+    // convert the raw bits of the float into the int type, then call encodeInt on that
+    return encodeInt(@as(AsInt, @bitCast(data)), writer);
+}
+
+fn encodeOptional(data: anytype, writer: anytype) !usize {
+    if (data) |payload| {
+        return try encode(true, writer) + try encode(payload, writer);
+    } else {
+        return try encode(false, writer);
+    }
+}
+
+// for a struct, let's just encode each field in the order it's declared
+fn encodeStruct(comptime S: std.builtin.Type.Struct, data: anytype, writer: anytype) !usize {
+    var bytes: usize = 0;
+    inline for (S.fields) |Field| {
+        bytes += try encode(@field(data, Field.name), writer);
+    }
+    return bytes;
+}
+
+fn encodePointer(comptime Ptr: std.builtin.Type.Pointer, data: anytype, writer: anytype) !usize {
+    const P = comptime @TypeOf(data);
+
+    switch (Ptr.size) {
+        .one => {
+            switch (@typeInfo(Ptr.child)) {
+                .array => {
+                    // *[N]T, can become []const T
+                    const Elem: type = std.meta.Elem(Ptr.child);
+                    const ConstSlice: type = []const Elem;
+                    return encode(@as(ConstSlice, data));
+                },
+                else => {
+                    // *T
+                    return encode(data.*, writer);
+                },
+            }
+        },
+        .many, .slice => {
+            // first, let's error out in the [*]T case, because there's no way to know when to stop encoding
+            if (Ptr.size == .many and Ptr.sentinel() == null) {
+                @compileError(@typeName(P) ++ " cannot be encoded because length cannot be determined");
+            }
+
+            // P (@TypeOf(data)) is one of these four cases:
+            //
+            // when Ptr.size == .slice
+            // * []const T
+            // * []T
+            //
+            // when Ptr.size == .many
+            // * [*:sentinel]T
+            // * [*:sentinel]const T
+            //
+            // We can coerce the bottom two cases into []T / []const T by using std.mem.span.
+            //
+            const slice = if (Ptr.size == .many) std.mem.span(data) else data;
+
+            // []u8, []const u8, etc
+            if (Ptr.child == u8) {
+                try writer.writeAll(slice);
+                return slice.len;
+            } else {
+                // and now with either []T or []const T, we can iterate over the items and encode
+                var bytes: usize = 0;
+                for (slice) |item| {
+                    bytes += try encode(item, writer);
+                }
+                return bytes;
+            }
+        },
+        else => @compileError(@typeName(P) ++ " cannot be encoded because it is not supported"),
+    }
+}
+
+// for a fixed size array, I guess I will just write each item independently
+fn encodeArray(comptime A: std.builtin.Type.Array, data: anytype, writer: anytype) !usize {
+    var bytes: usize = 0;
+    inline for (0..A.len) |idx| {
+        bytes += try encode(data[idx], writer);
+    }
+    return bytes;
+}
+
+fn encodeEnum(comptime E: std.builtin.Type.Enum, data: anytype, writer: anytype) !usize {
+    const Enum = comptime @TypeOf(data);
+    const Tag = comptime E.tag_type;
+
+    const encode_tag_fn_name = "craftEncodeTag";
+    if (std.meta.hasFn(Enum, encode_tag_fn_name)) {
+        const fn_handle = @field(Enum, encode_tag_fn_name);
+        const fn_info = @typeInfo(@TypeOf(fn_handle)).@"fn";
+        // fn could accept the enum type itself, or it could accept the tag type
+        if (fn_info.params.len != 1) {
+            @compileError(@typeName(Enum) ++ "." ++ encode_tag_fn_name ++ " must declare exactly one parameter");
+        }
+
+        const param0_type = fn_info.params[0].type.?;
+        switch (param0_type) {
+            Enum => return encode(@call(.auto, fn_handle, .{data}), writer),
+            Tag => return encode(@call(.auto, fn_handle, .{@intFromEnum(data)}), writer),
+            else => @compileError("cannot use " ++ @typeName(Enum) ++ "." ++ encode_tag_fn_name ++ "(" ++ @typeName(param0_type) ++ ") because parameter type is not supported"),
+        }
+    } else {
+        return encode(@intFromEnum(data), writer);
+    }
+}
+
+pub fn Decoded(comptime T: type) type {
+    return struct {
+        value: T,
+        bytes_read: usize,
+
+        pub fn unwrap(self: @This(), byte_counter: ?*usize) T {
+            if (byte_counter) |ctr_ptr| {
+                ctr_ptr.* += self.bytes_read;
             }
 
             return self.value;
         }
-
-        pub fn format(self: Self, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-            try std.fmt.format(writer, fmt, .{self.value});
-        }
     };
 }
 
-// VarInt / VarLong algorthim, generalized
-// argument = the number of bits (32 = int, 64 = long)
-fn VarNum(comptime Bits: u16) type {
-    return struct {
-        pub const BitSize = Bits;
-        pub const ByteSize: usize = @intCast(std.math.divCeil(u16, BitSize, 7) catch @compileError("failed to divide BitSize by 7"));
-        pub const Int = std.meta.Int(.signed, Bits);
-        const BitCounter = std.meta.Int(.unsigned, std.math.log2_int_ceil(u16, Bits));
-        const Self = @This();
-
-        value: Int,
-
-        pub fn init(i: Int) Self {
-            return .{ .value = i };
+fn decodeVarnum(comptime VarNum: type, reader: anytype) !Decoded(VarNum) {
+    const BIT_SIZE = comptime @bitSizeOf(VarNum);
+    const MAX_BYTES = comptime std.math.divCeil(usize, BIT_SIZE, 7) catch unreachable;
+    comptime {
+        switch (@typeInfo(VarNum)) {
+            .@"enum" => {},
+            else => @compileError("var num must be enum with integer tag"),
         }
+    }
 
-        pub fn length(self: *const Self) usize {
-            const bitsRequired: u16 = Bits - @clz(self.value);
-            const bytesRequired: usize = @intCast(std.math.divCeil(u16, bitsRequired, 7) catch unreachable);
-            if (bytesRequired == 0) {
-                return 1;
-            } else {
-                return bytesRequired;
-            }
+    const Int = comptime @typeInfo(VarNum).@"enum".tag_type;
+    comptime {
+        switch (@typeInfo(Int)) {
+            .int => {},
+            else => @compileError("var num must be enum with integer tag"),
         }
+    }
 
-        pub fn encode(self: *const Self, writer: anytype) !usize {
-            var buf: [ByteSize]u8 = undefined;
-            var toWrite: Int = self.value;
-            var bytesWritten: usize = 0;
-            while (true) {
-                var byte: u8 = @intCast(toWrite & 0x7F);
-                toWrite >>= 7;
-                const hasMore = toWrite != 0;
-                if (hasMore) {
-                    byte |= 0x80;
-                }
-                buf[bytesWritten] = byte;
-                bytesWritten += 1;
-                if (hasMore) {
-                    if (bytesWritten >= ByteSize) {
-                        return error.VarNumTooLarge;
-                    }
-                } else {
-                    try writer.writeAll(buf[0..bytesWritten]);
-                    return bytesWritten;
-                }
-            }
+    var decoded: Int = 0;
+    var bytes: usize = 0;
+    while (true) {
+        const b: u8 = try reader.readByte();
+        const data: Int = @intCast(b & 0x7F);
+        decoded |= data << @intCast(7 * bytes);
+        bytes += 1;
+        if ((b & 0x80) == 0) {
+            return .{ .bytes_read = bytes, .value = @enumFromInt(decoded) };
+        } else if (bytes >= MAX_BYTES) {
+            return error.VarNumTooLong;
         }
+    }
+}
 
-        pub fn decode(_: std.mem.Allocator, reader: anytype, _: usize) !Decoded(Self) {
-            var bitsRead: BitCounter = 0;
-            var value: Int = 0;
-            var bytesRead: usize = 0;
-            while (true) {
-                const byte: Int = @intCast(try reader.readByte());
-                value |= (byte & 0x7F) << bitsRead;
-                bitsRead += 7;
-                bytesRead += 1;
-                if (byte & 0x80 == 0) {
-                    return .{
-                        .value = .{ .value = value },
-                        .bytes = bytesRead,
-                    };
-                }
+fn decodeInt(comptime Int: type, reader: anytype) !Decoded(Int) {
+    const NUM_BITS = comptime @bitSizeOf(Int);
+    const BYTES = comptime std.math.divExact(usize, NUM_BITS, 8) catch @compileError(@typeName(Int) ++ " is not byte sized (divisible by 8), cannot encode");
 
-                if (bitsRead >= Bits) {
-                    return error.VarNumTooLarge;
-                }
-            }
-        }
+    const decoded: Int = try reader.readInt(Int, .big);
+    return .{ .bytes_read = BYTES, .value = decoded };
+}
 
-        pub fn format(self: Self, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-            if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
-            try std.fmt.format(writer, "{}", .{self.value});
-        }
+fn decodeBool(reader: anytype) !Decoded(bool) {
+    return .{
+        .bytes_read = 1,
+        .value = switch (try reader.readByte()) {
+            0x00 => false,
+            0x01 => true,
+            else => return error.UnexpectedBoolByte,
+        },
     };
 }
 
-pub const VarInt = VarNum(32);
-pub const VarLong = VarNum(64);
+fn decodeFloat(comptime Float: type, reader: anytype) !Decoded(Float) {
+    const NUM_BITS = comptime @bitSizeOf(Float);
 
-fn CraftInt(comptime i: type) type {
-    return struct {
-        value: Int,
-
-        pub const Int = i;
-
-        const Self = @This();
-        const Length = @sizeOf(Int);
-
-        pub fn init(v: Int) Self {
-            return .{ .value = v };
+    // craft protocol defined to only work for "float" and "double" aka f32, f64
+    comptime {
+        switch (NUM_BITS) {
+            32 => {},
+            64 => {},
+            else => @compileError("craft protocol only supports f32 and f64, refusing to decode"),
         }
+    }
 
-        pub fn length(_: *const Self) usize {
-            return Length;
-        }
+    // compute an equiv unsigned integer type so we can do a bit cast
+    // for example, f32 becomes AsInt=u32, f64 becomes AsInt=u64
+    const AsInt: type = comptime @Type(.{ .int = .{
+        .bits = NUM_BITS,
+        .signedness = .unsigned,
+    } });
 
-        pub fn encode(self: *const Self, writer: anytype) !usize {
-            try writer.writeInt(Int, self.value, .big);
-            return Length;
-        }
+    const intDecoded: Decoded(AsInt) = try decodeInt(AsInt, reader);
+    const f = @as(Float, @bitCast(intDecoded));
+    return .{ .bytes_read = intDecoded.bytes_read, .value = f };
+}
 
-        pub fn decode(_: std.mem.Allocator, reader: anytype, _: usize) !Decoded(Self) {
-            return .{ .bytes = Length, .value = .{ .value = try reader.readInt(Int, .big) } };
-        }
+fn decodePointer(comptime _: std.builtin.Type.Pointer, comptime Data: type, _: anytype, _: std.mem.Allocator) !Decoded(Data) {
+    @compileError("cannot decode " ++ @typeName(Data));
+    // fn decodePointer(comptime Ptr: std.builtin.Type.Pointer, comptime Data: type, reader: anytype, allocator: std.mem.Allocator) !Decoded(Data) {
+    // const P = @TypeOf(Data);
+    // switch (Ptr.size) {
+    //     .one => {},
+    // }
+}
 
-        pub fn format(self: Self, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-            if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
-            try std.fmt.format(writer, "{}", .{self.value});
-        }
+fn decodeStruct(comptime S: std.builtin.Type.Struct, comptime Data: type, reader: anytype, allocator: std.mem.Allocator) !Decoded(Data) {
+    var decoded_value: Data = undefined;
+    var bytes: usize = 0;
+
+    inline for (S.fields) |Field| {
+        @field(decoded_value, Field.name) = (try decode(Field.type, reader, allocator)).unwrap(&bytes);
+    }
+
+    return .{
+        .bytes_read = bytes,
+        .value = decoded_value,
     };
 }
 
-pub const Long = CraftInt(i64);
-pub const UShort = CraftInt(u16);
-pub const UByte = CraftInt(u8);
+// fn decodeArray(comptime A: std.builtin.Type.Array, comptime Data: type, reader: anytype, allocator: std.mem.Allocator) !Decoded(Data) {
+fn decodeArray(comptime _: std.builtin.Type.Array, comptime Data: type, _: anytype, _: std.mem.Allocator) !Decoded(Data) {
+    @compileError("cannot decode " ++ @typeName(Data));
+}
 
-pub const Bool = struct {
-    value: bool,
+fn decodeOptional(comptime Opt: std.builtin.Type.Optional, comptime Data: type, reader: anytype, allocator: std.mem.Allocator) !Decoded(Data) {
+    var out: Decoded(Data) = undefined;
+    out.bytes_read = 0;
 
-    pub const ByteSize: usize = 1;
-    const Self = @This();
+    const has_payload: bool = (try decode(bool, reader, allocator)).unwrap(&out.bytes_read);
 
-    pub fn init(v: bool) Self {
-        return .{ .value = v };
+    if (has_payload) {
+        out.value = (try decode(Opt.child, reader, allocator)).unwrap(&out.bytes_read);
+    } else {
+        out.value = null;
     }
 
-    pub fn length(_: *const Self) usize {
-        return ByteSize;
-    }
+    return out;
+}
 
-    pub fn encode(self: *const Self, writer: anytype) !usize {
-        try writer.writeByte(if (self.value) 1 else 0);
-        return ByteSize;
-    }
+fn decodeEnum(comptime E: std.builtin.Type.Enum, comptime Enum: type, reader: anytype, allocator: std.mem.Allocator) !Decoded(Enum) {
+    const Tag = E.tag_type;
 
-    pub fn decode(_: std.mem.Allocator, reader: anytype, _: usize) !Decoded(Self) {
-        return .{
-            .bytes = 1,
-            .value = .{
-                .value = switch (try reader.readByte()) {
-                    0 => false,
-                    1 => true,
-                    else => return error.UnexpectedBoolByte,
-                },
-            },
+    // allow an enum to define a function craftDecodeTag(DeserializeType) Tag
+    //
+    // if this function is defined, we will deserialize the type of the first argument,
+    // then call craftDecodeTag with that value, and use the returned Tag with
+    // @enumFromInt
+    const decode_tag_fn_name = "craftDecodeTag";
+    if (std.meta.hasFn(Enum, decode_tag_fn_name)) {
+        const f = @field(Enum, decode_tag_fn_name);
+        const fn_info = @typeInfo(@TypeOf(f)).@"fn";
+        if (fn_info.params.len != 1) {
+            @compileError(@typeName(Enum) ++ "." ++ decode_tag_fn_name ++ "must accept exactly one parameter");
+        }
+
+        const WireTagType = fn_info.params[0].type.?;
+        const ReturnType = fn_info.return_type.?;
+
+        // decode a value, using the type of the first parameter for craftDecodeTag
+        const wire_tag_info: Decoded(WireTagType) = try decode(WireTagType, reader, allocator);
+        const bytes_read: usize = wire_tag_info.bytes_read;
+        const wire_tag: WireTagType = wire_tag_info.value;
+        defer if (std.meta.hasFn(WireTagType, "deinit")) {
+            wire_tag.deinit();
         };
-    }
 
-    pub fn format(self: Self, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
-        try writer.writeAll(if (self.value) "true" else "false");
-    }
-};
+        // call craftDecodeTag(WireTag) -> ??
+        const decoded_tag: ReturnType = @call(.auto, f, .{wire_tag});
 
-pub fn PossiblyOwnedSlice(comptime Component: type) type {
-    const Owned = struct {
-        data: []Component,
-        allocator: std.mem.Allocator,
+        // now try to interpret the ReturnType
+        const enum_value = calc_enum_value: {
+            switch (ReturnType) {
+                Tag => break :calc_enum_value (try std.meta.intToEnum(Enum, decoded_tag)),
+                Enum => break :calc_enum_value decoded_tag,
+                else => {
+                    switch (@typeInfo(ReturnType)) {
+                        .error_union => |EU| {
+                            const EUPld = EU.payload;
+                            const non_error: EUPld = try decoded_tag;
+                            switch (EUPld) {
+                                Tag => break :calc_enum_value try std.meta.intToEnum(Enum, non_error),
+                                Enum => break :calc_enum_value non_error,
+                                else => {},
+                            }
+                        },
+                        else => {},
+                    }
+                },
+            }
+
+            @compileError("return type " ++ @typeName(ReturnType) ++ " for " ++ @typeName(Enum) ++ "." ++ decode_tag_fn_name ++ " is not supported");
+        };
+        return .{ .value = enum_value, .bytes_read = bytes_read };
+    } else {
+        const dcd = try decode(Tag, reader, allocator);
+        const converted: Enum = try std.meta.intToEnum(Enum, dcd.value);
+        return .{ .value = converted, .bytes_read = dcd.bytes_read };
+    }
+}
+
+pub fn EnumTable(comptime Enum: type, comptime Item: type) type {
+    return [@typeInfo(Enum).@"enum".fields.len]Item;
+}
+
+pub fn CraftEncodeStrEnum(enum_value: anytype, comptime TABLE: EnumTable(@TypeOf(enum_value), []const u8)) String {
+    return String.init(TABLE[@intFromEnum(enum_value)]);
+}
+
+pub fn CraftDecodeStrEnum(comptime Enum: type, str: String, comptime TABLE: EnumTable(Enum, []const u8)) !Enum {
+    const str_slice = str.constSlice();
+    for (TABLE, 0..) |variant, idx| {
+        if (std.mem.eql(u8, variant, str_slice)) {
+            return @enumFromInt(idx);
+        }
+    }
+    return error.BadEnumVariant;
+}
+
+pub fn AutoStringEnum(comptime Enum: type) type {
+    return struct {
+        const STRINGS_TABLE = AutoEnumStringsTable(Enum);
+
+        pub fn craftEncodeTag(self: Enum) String {
+            return CraftEncodeStrEnum(self, STRINGS_TABLE);
+        }
+
+        pub fn craftDecodeTag(tag: String) !Enum {
+            return CraftDecodeStrEnum(Enum, tag, STRINGS_TABLE);
+        }
     };
+}
 
+pub fn AutoVarNumEnum(comptime Enum: type, comptime VarNum: type) type {
+    const TagType = @typeInfo(Enum).@"enum".tag_type;
+    return struct {
+        pub fn craftEncodeTag(self: TagType) VarNum {
+            return @enumFromInt(self);
+        }
+
+        pub fn craftDecodeTag(tag: VarNum) TagType {
+            return @intFromEnum(tag);
+        }
+    };
+}
+
+pub fn AutoEnumStringsTable(comptime Enum: type) [@typeInfo(Enum).@"enum".fields.len][]const u8 {
+    comptime {
+        var out: [@typeInfo(Enum).@"enum".fields.len][]const u8 = undefined;
+        for (@typeInfo(Enum).@"enum".fields, 0..) |Field, idx| {
+            out[idx] = Field.name;
+        }
+        return out;
+    }
+}
+
+pub fn Cow(comptime Payload: type) type {
     return union(enum) {
+        pub const Owned = struct {
+            ptr: *Payload,
+            allocator: std.mem.Allocator,
+        };
+
+        borrowed: *const Payload,
         owned: Owned,
-        borrowed: []const Component,
 
-        const Self = @This();
+        const Ctr = @This();
 
-        pub fn deinit(self: Self) void {
-            switch (self) {
-                .owned => |*o| {
-                    // deinit each item
-                    if (std.meta.hasFn(Component, "deinit")) {
-                        for (o.data) |item| {
+        pub fn init(data: *const Payload) Ctr {
+            return .{ .borrowed = data };
+        }
+
+        pub fn borrow(ctr: Ctr) Ctr {
+            return .{ .borrowed = ctr.constPtr() };
+        }
+
+        pub fn deinit(ctr: Ctr) void {
+            switch (ctr) {
+                .owned => |o| {
+                    if (std.meta.hasFn(Payload, "deinit")) {
+                        o.ptr.*.deinit();
+                    }
+
+                    o.allocator.destroy(o.ptr);
+                },
+                .borrowed => {},
+            }
+        }
+
+        pub fn constPtr(ctr: Ctr) *const Payload {
+            return switch (ctr) {
+                .owned => |o| o.ptr,
+                .borrowed => |ptr| ptr,
+            };
+        }
+
+        pub fn craftEncode(ctr: Ctr, writer: anytype) !usize {
+            return encode(ctr.constPtr(), writer);
+        }
+
+        pub fn craftDecode(reader: anytype, allocator: std.mem.Allocator) !Decoded(Ctr) {
+            const ownedPtr: *Payload = try allocator.create(Payload);
+            const dcd = try decode(Payload, reader, allocator);
+            ownedPtr.* = dcd.value;
+            return .{
+                .value = .{
+                    .owned = .{
+                        .ptr = ownedPtr,
+                        .allocator = allocator,
+                    },
+                },
+                .bytes_read = dcd.bytes_read,
+            };
+        }
+    };
+}
+
+pub fn CowSlice(comptime Payload: type) type {
+    return union(enum) {
+        pub const Owned = struct {
+            ptr: []Payload,
+            allocator: std.mem.Allocator,
+        };
+
+        borrowed: []const Payload,
+        owned: Owned,
+
+        const Ctr = @This();
+
+        pub fn borrow(ctr: Ctr) Ctr {
+            return .{ .borrowed = ctr.constSlice() };
+        }
+
+        pub fn deinit(ctr: Ctr) void {
+            switch (ctr) {
+                .owned => |o| {
+                    if (std.meta.hasFn(Payload, "deinit")) {
+                        for (o.ptr) |item| {
                             item.deinit();
                         }
                     }
 
-                    // free the memory where each item lives
-                    o.allocator.free(o.data);
+                    o.allocator.free(o.ptr);
                 },
                 else => {},
             }
         }
 
-        pub fn toOwned(self: Self, allocator: std.mem.Allocator) !Owned {
-            switch (self) {
-                .owned => |o| return o,
-                .borrowed => |data| {
-                    const duped = try allocator.dupe(Component, data);
-                    return .{ .data = duped, .allocator = allocator };
-                },
-            }
-        }
-
-        pub fn constSlice(self: *const Self) []const Component {
-            return switch (self.*) {
-                .owned => |*o| o.data,
-                .borrowed => |data| data,
+        pub fn constSlice(ctr: *const Ctr) []const Payload {
+            return switch (ctr.*) {
+                .owned => |o| o.ptr,
+                .borrowed => |b| b,
             };
         }
 
-        pub fn format(self: Self, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-            if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
-            try std.fmt.format(writer, "{}", .{self.constSlice()});
+        pub fn craftEncode(ctr: Ctr, writer: anytype) !usize {
+            return encode(ctr.constSlice(), writer);
+        }
+
+        fn craftDecodeN(num: usize, reader: anytype, allocator: std.mem.Allocator) !Decoded(Ctr) {
+            const slice: []Payload = try allocator.alloc(Payload, num);
+            var bytes: usize = 0;
+            if (Payload == u8) {
+                try reader.readNoEof(slice);
+                bytes = slice.len;
+            } else {
+                for (0..num) |idx| {
+                    slice[idx] = (try decode(Payload, reader, allocator)).unwrap(&bytes);
+                }
+            }
+            return .{
+                .bytes_read = bytes,
+                .value = .{
+                    .owned = .{
+                        .ptr = slice,
+                        .allocator = allocator,
+                    },
+                },
+            };
         }
     };
 }
 
-pub const String = CountedArray(VarInt, u8);
+pub fn LengthPrefixed(comptime Counter: type, comptime Payload: type) type {
+    return struct {
+        items: ItemsSlice,
+
+        const Ctr = @This();
+        pub const EMPTY: Ctr = .init(&.{});
+        const ItemsSlice = CowSlice(Payload);
+
+        pub fn init(items: []const Payload) Ctr {
+            return .{ .items = .{ .borrowed = items } };
+        }
+
+        pub fn borrow(ctr: Ctr) Ctr {
+            return .{ .items = ctr.items.borrow() };
+        }
+
+        pub fn deinit(ctr: Ctr) void {
+            ctr.items.deinit();
+        }
+
+        pub fn craftEncode(ctr: Ctr, writer: anytype) !usize {
+            const items = ctr.constSlice();
+            var bytes: usize = 0;
+
+            bytes += try encode(@as(Counter, @enumFromInt(items.len)), writer);
+            bytes += try encode(ctr.items, writer);
+            return bytes;
+        }
+
+        pub fn craftDecode(reader: anytype, allocator: std.mem.Allocator) !Decoded(Ctr) {
+            var bytes: usize = 0;
+            const counter: Counter = (try decode(Counter, reader, allocator)).unwrap(&bytes);
+            const items: ItemsSlice = (try ItemsSlice.craftDecodeN(@intCast(@intFromEnum(counter)), reader, allocator)).unwrap(&bytes);
+            return .{ .bytes_read = bytes, .value = .{ .items = items } };
+        }
+
+        pub fn constSlice(ctr: *const Ctr) []const Payload {
+            return ctr.items.constSlice();
+        }
+    };
+}
+
+pub const String = LengthPrefixed(VarInt, u8);
 
 test "encode string" {
     const testData = "hello world";
@@ -255,7 +686,7 @@ test "encode string" {
     var buf = std.ArrayList(u8).init(std.testing.allocator);
     defer buf.deinit();
 
-    const bytesWritten = try craftStr.encode(buf.writer());
+    const bytesWritten = try encode(craftStr, buf.writer());
     try std.testing.expectEqual(testData.len + 1, bytesWritten);
     try std.testing.expectEqualSlices(u8, &.{
         0x0B, // 11
@@ -274,319 +705,77 @@ test "decode string" {
     };
 
     var stream = std.io.fixedBufferStream(testData);
-    const reader = stream.reader();
-
-    const decoded = try String.decode(std.testing.allocator, reader);
-    defer decoded.deinit();
-
-    try std.testing.expectEqual(testData.len, decoded.bytes);
-    try std.testing.expectEqualStrings("hello world", decoded.value.constSlice());
+    const decoded = try decode(String, stream.reader(), std.testing.allocator);
+    const strCow = decoded.value;
+    defer strCow.deinit();
+    try std.testing.expectEqual(testData.len, decoded.bytes_read);
+    const str: []const u8 = strCow.constSlice();
+    try std.testing.expectEqualStrings("hello world", str);
 }
 
-pub fn Struct(comptime Pld: type) type {
-    return struct {
-        pub fn deinit(self: Pld) void {
-            inline for (std.meta.fields(Pld)) |field| {
-                if (std.meta.hasFn(field.type, "deinit")) {
-                    @field(self, field.name).deinit();
-                }
-            }
-        }
+test "handshaking packet" {
+    const HandshakingPacket = struct {
+        version: VarInt,
+        address: String,
+        port: u16,
+        nextState: enum(i32) {
+            status = 1,
+            login = 2,
+            transfer = 3,
 
-        pub fn length(self: *const Pld) usize {
-            var totalLength: usize = 0;
-            inline for (std.meta.fields(Pld)) |field| {
-                totalLength += @field(self, field.name).length();
-            }
-            return totalLength;
-        }
+            pub usingnamespace AutoVarNumEnum(@This(), VarInt);
+        },
 
-        pub fn decode(allocator: std.mem.Allocator, reader: anytype, origBytesLeft: usize) !Decoded(Pld) {
-            var bytesLeft = origBytesLeft;
-            var decoded: Pld = undefined;
-            var bytesRead: usize = 0;
-            inline for (std.meta.fields(Pld)) |field| {
-                const fieldDecoded: Decoded(field.type) = try field.type.decode(allocator, reader, bytesLeft);
-                bytesRead += fieldDecoded.bytes;
-                bytesLeft -= fieldDecoded.bytes;
-                @field(decoded, field.name) = fieldDecoded.value;
-            }
-            return .{ .bytes = bytesRead, .value = decoded };
-        }
-
-        pub fn encode(self: *const Pld, writer: anytype) !usize {
-            var totalSize: usize = 0;
-            inline for (std.meta.fields(Pld)) |field| {
-                totalSize += try @field(self, field.name).encode(writer);
-            }
-            return totalSize;
-        }
-
-        pub fn format(self: Pld, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-            if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
-
-            try writer.writeAll("{");
-            const fields = std.meta.fields(Pld);
-            if (fields.len > 1) {
-                try writer.writeAll("\n");
-            } else {
-                try writer.writeAll(" ");
-            }
-
-            inline for (fields) |field| {
-                if (fields.len > 1) {
-                    try writer.writeAll("   ");
-                }
-                try std.fmt.format(writer, "{s} = {},", .{ field.name, @field(self, field.name) });
-                if (fields.len > 1) {
-                    try writer.writeAll("\n");
-                }
-            }
-            try writer.writeAll("}");
+        fn deinit(self: @This()) void {
+            self.address.deinit();
         }
     };
-}
 
-pub fn IntEnum(
-    comptime I: type,
-    comptime Payload: type,
-) type {
-    return struct {
-        value: Enum,
-
-        const Self = @This();
-        pub const Enum = Payload;
-
-        pub fn init(v: Enum) Self {
-            return .{ .value = v };
-        }
-
-        pub fn length(self: *const Self) usize {
-            const ctr: I = I.init(@intFromEnum(self.value));
-            return ctr.length();
-        }
-
-        pub fn decode(allocator: std.mem.Allocator, reader: anytype, _: usize) !Decoded(Self) {
-            var size: usize = 0;
-            const decoded: Enum = std.meta.intToEnum((try I.decode(allocator, reader)).unbox(&size)) catch {
-                return error.InvalidEnumVariant;
-            };
-            return .{ .value = .{ .value = decoded }, .bytes = size };
-        }
-
-        pub fn encode(self: *const Self, writer: anytype) !usize {
-            const ctr: I = I.init(@intFromEnum(self.value));
-            return ctr.encode(writer);
-        }
-
-        pub fn format(self: Self, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-            if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
-            try std.fmt.format(writer, ".{s} ({d})", .{
-                @tagName(self.value),
-                @intFromEnum(self.value),
-            });
-        }
+    const pkt: HandshakingPacket = .{
+        .version = @enumFromInt(770),
+        .address = .init("localhost"),
+        .port = 25565,
+        .nextState = .status,
     };
+
+    var buf = std.ArrayList(u8).init(std.testing.allocator);
+    defer buf.deinit();
+
+    const num_bytes = try encode(pkt, buf.writer());
+
+    var stream = std.io.fixedBufferStream(buf.items);
+    const decoded: Decoded(HandshakingPacket) = try decode(HandshakingPacket, stream.reader(), std.testing.allocator);
+    const hs_pkt_decoded = decoded.value;
+    defer hs_pkt_decoded.deinit();
+    const hs_bytes_read = decoded.bytes_read;
+
+    try std.testing.expectEqual(num_bytes, hs_bytes_read);
+    try std.testing.expectEqual(pkt.version, hs_pkt_decoded.version);
+    try std.testing.expectEqualStrings(pkt.address.constSlice(), hs_pkt_decoded.address.constSlice());
+    try std.testing.expectEqual(pkt.port, hs_pkt_decoded.port);
+    try std.testing.expectEqual(pkt.nextState, hs_pkt_decoded.nextState);
 }
 
-pub fn CountedArray(
-    comptime Counter: type,
-    comptime Payload: type,
-) type {
-    return struct {
-        items: PossiblyOwnedSlice(Payload),
+test "string enum" {
+    const NameTagVisibility = enum {
+        always,
+        hideForOtherTeams,
+        hideForOwnTeam,
+        never,
 
-        const Self = @This();
-
-        pub fn init(items: []const Payload) Self {
-            return .{ .items = .{ .borrowed = items } };
-        }
-
-        pub fn deinit(self: Self) void {
-            self.items.deinit();
-        }
-
-        pub fn length(self: *const Self) usize {
-            const counter = self.count();
-            var size: usize = counter.length();
-            for (self.constSlice()) |item| {
-                size += item.length();
-            }
-            return size;
-        }
-
-        pub fn decode(allocator: std.mem.Allocator, reader: anytype, origBytesLeft: usize) !Decoded(Self) {
-            var bytes: usize = 0;
-            var bytesLeft: usize = origBytesLeft;
-            const counterDecoded: Decoded(Counter) = try Counter.decode(allocator, reader, origBytesLeft);
-            bytes += counterDecoded.bytes;
-            bytesLeft -= counterDecoded.bytes;
-            const c: usize = @intCast(counterDecoded.value.value);
-
-            var data = try std.ArrayList(Payload).initCapacity(allocator, c);
-            defer data.deinit();
-
-            if (Payload == u8) {
-                try reader.readNoEof(data.addManyAsSliceAssumeCapacity(c));
-                bytes += c;
-            } else {
-                for (0..c) |_| {
-                    const itemDecoded: Decoded(Payload) = try Payload.decode(allocator, reader, bytesLeft);
-                    try data.append(itemDecoded.value);
-                    bytes += itemDecoded.bytes;
-                    bytesLeft -= itemDecoded.bytes;
-                }
-            }
-
-            return .{
-                .value = .{
-                    .items = .{
-                        .owned = .{
-                            .data = try data.toOwnedSlice(),
-                            .allocator = allocator,
-                        },
-                    },
-                },
-                .bytes = bytes,
-            };
-        }
-
-        pub fn encode(self: *const Self, writer: anytype) !usize {
-            var written: usize = 0;
-            written += try self.count().encode(writer);
-            const slice = self.constSlice();
-            if (Payload == u8) {
-                try writer.writeAll(slice);
-                written += slice.len;
-            } else {
-                for (self.constSlice()) |item| {
-                    written += try item.encode(writer);
-                }
-            }
-            return written;
-        }
-
-        pub fn count(self: *const Self) Counter {
-            return .init(@intCast(self.constSlice().len));
-        }
-
-        pub fn constSlice(self: *const Self) []const Payload {
-            return self.items.constSlice();
-        }
-
-        pub fn borrowed(self: *const Self) Self {
-            return switch (self.items) {
-                .borrowed => self.*,
-                .owned => .init(self.constSlice()),
-            };
-        }
-
-        pub fn format(self: Self, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-            if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
-            const s = self.constSlice();
-            if (Payload == u8) {
-                try writer.writeAll("\"");
-                try std.fmt.format(writer, "{s}", .{s});
-                try writer.writeAll("\"");
-            } else {
-                try std.fmt.format(writer, "({d})[", .{s.len});
-                for (s) |item| {
-                    try std.fmt.format(writer, "{}, ", .{item});
-                }
-                try writer.writeAll("]");
-            }
-        }
+        pub usingnamespace AutoStringEnum(@This());
     };
+
+    // test encode and decode for "hideForOtherTeams" (should encode as the string "hideForOtherTeams")
+    var buf = std.ArrayList(u8).init(std.testing.allocator);
+    defer buf.deinit();
+    const v: NameTagVisibility = .hideForOtherTeams;
+    _ = try encode(v, buf.writer());
+
+    var readerStream = std.io.fixedBufferStream(buf.items);
+    const decoded: NameTagVisibility = (try decode(NameTagVisibility, readerStream.reader(), std.testing.allocator)).unwrap(null);
+    try std.testing.expectEqual(v, decoded);
 }
-
-pub fn RestOfPacketArray(comptime Payload: type) type {
-    return struct {
-        items: PossiblyOwnedSlice(Payload),
-
-        const Self = @This();
-
-        pub fn init(items: []const Payload) Self {
-            return .{ .items = .{ .borrowed = items } };
-        }
-
-        pub fn deinit(self: Self) void {
-            self.items.deinit();
-        }
-
-        pub fn length(self: *const Self) usize {
-            var l: usize = 0;
-            for (self.constSlice()) |item| {
-                l += item.length();
-            }
-            return l;
-        }
-
-        pub fn decode(allocator: std.mem.Allocator, reader: anytype, origBytesLeft: usize) !Decoded(Self) {
-            var data = std.ArrayList(Payload).init(allocator);
-            defer data.deinit();
-
-            var bytesRead: usize = 0;
-            if (Payload == u8) {
-                try reader.readNoEof(try data.addManyAsSlice(origBytesLeft));
-                bytesRead += origBytesLeft;
-            } else {
-                var bytesLeft: usize = origBytesLeft;
-                while (bytesLeft > 0) {
-                    const itemDecoded: Decoded(Payload) = try Payload.decode(allocator, reader, bytesLeft);
-                    bytesLeft -= itemDecoded.bytes;
-                    bytesRead += itemDecoded.bytes;
-                    data.append(itemDecoded.value);
-                }
-            }
-
-            return .{
-                .value = .{
-                    .items = .{
-                        .owned = .{
-                            .data = try data.toOwnedSlice(),
-                            .allocator = allocator,
-                        },
-                    },
-                },
-                .bytes = bytesRead,
-            };
-        }
-
-        pub fn encode(self: *const Self, writer: anytype) !usize {
-            var bytes: usize = 0;
-
-            const data = self.constSlice();
-            if (Payload == u8) {
-                try writer.writeAll(data);
-                bytes = data.len;
-            } else {
-                for (data) |item| {
-                    bytes += try item.encode(writer);
-                }
-            }
-
-            return bytes;
-        }
-
-        pub fn borrowed(self: *const Self) Self {
-            return switch (self.items.*) {
-                .borrowed => self.*,
-                .owned => .init(self.constSlice()),
-            };
-        }
-
-        pub fn constSlice(self: *const Self) []const Payload {
-            return self.items.constSlice();
-        }
-
-        pub fn format(self: Self, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-            if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
-            try std.fmt.format(writer, "{}", self.constSlice());
-        }
-    };
-}
-
-pub const RemainingBytes = RestOfPacketArray(u8);
 
 pub const UUID = struct {
     pub const ByteSize: usize = 16;
@@ -617,15 +806,15 @@ pub const UUID = struct {
         return ByteSize;
     }
 
-    pub fn encode(uuid: *const UUID, writer: anytype) !usize {
+    pub fn craftEncode(uuid: UUID, writer: anytype) !usize {
         try writer.writeAll(&uuid.raw);
         return ByteSize;
     }
 
-    pub fn decode(_: std.mem.Allocator, reader: anytype, _: usize) !Decoded(UUID) {
+    pub fn craftDecode(reader: anytype, _: std.mem.Allocator) !Decoded(UUID) {
         var out: UUID = undefined;
         try reader.readNoEof(&out.raw);
-        return .{ .bytes = ByteSize, .value = out };
+        return .{ .bytes_read = ByteSize, .value = out };
     }
 
     fn Emitter(Writer: type) type {
@@ -800,107 +989,75 @@ test "encode uuid" {
     try std.testing.expectEqualStrings(&id0.raw, buf.items);
 }
 
-pub fn Optional(comptime Payload: type) type {
-    return union(enum) {
-        some: Payload,
-        none,
+pub fn RestOfPacketArray(comptime Payload: type) type {
+    return struct {
+        items: ItemSlice,
 
-        const Self = @This();
+        pub const ItemSlice = CowSlice(Payload);
 
-        pub fn init(pld: Payload) Self {
-            return .{ .some = pld };
+        const Ctr = @This();
+
+        pub const EMPTY: Ctr = .init(&.{});
+
+        pub fn init(in: []const Payload) Ctr {
+            return .{ .items = .{ .borrowed = in } };
         }
 
-        pub fn deinit(self: Self) void {
-            if (std.meta.hasFn(Payload, "deinit")) {
-                switch (self) {
-                    .some => |pld| {
-                        pld.deinit();
+        pub fn deinit(self: Ctr) void {
+            self.items.deinit();
+        }
+
+        pub fn craftEncode(self: Ctr, writer: anytype) !usize {
+            return self.items.craftEncode(writer);
+        }
+
+        pub fn craftDecode(reader: anytype, allocator: std.mem.Allocator) !Decoded(Ctr) {
+            if (Payload == u8) {
+                // we own this memory
+                const out: Ctr = .{
+                    .items = .{
+                        .owned = .{
+                            .ptr = (try reader.readAllAlloc(allocator, MAX_PACKET_SIZE)),
+                            .allocator = allocator,
+                        },
                     },
-                    .none => {},
-                }
-            }
-        }
-
-        pub fn encode(self: *const Self, writer: anytype) !usize {
-            var bytes: usize = 0;
-            switch (self.*) {
-                .some => |*pld| {
-                    const craftBool: Bool = .init(true);
-                    bytes += try craftBool.encode(writer);
-                    bytes += try pld.encode(writer);
-                },
-                .none => {
-                    const craftBool: Bool = .init(false);
-                    bytes += try craftBool.encode(writer);
-                },
-            }
-            return bytes;
-        }
-
-        pub fn length(self: *const Self) usize {
-            return Bool.ByteSize + switch (self.*) {
-                .some => |*pld| pld.length(),
-                .none => 0,
-            };
-        }
-
-        pub fn decode(allocator: std.mem.Allocator, reader: anytype, bytesLeftOrig: usize) !Decoded(Self) {
-            var bytesLeft: usize = bytesLeftOrig;
-            var bytes: usize = 0;
-
-            const presentDecoded: Decoded(Bool) = try Bool.decode(allocator, reader, bytesLeft);
-            bytes += presentDecoded.bytes;
-
-            if (presentDecoded.value.value) {
-                bytesLeft -= presentDecoded.bytes;
-
-                const payloadDecoded: Decoded(Payload) = try Payload.decode(allocator, reader, bytesLeft);
-                bytes += payloadDecoded.bytes;
-                bytesLeft -= payloadDecoded.bytes;
-                return .{ .bytes = bytes, .value = .{ .some = payloadDecoded.value } };
+                };
+                return .{
+                    .bytes_read = out.constSlice().len,
+                    .value = out,
+                };
             } else {
-                return .{ .bytes = bytes, .value = .none };
+                var buf = std.ArrayList(Payload).init(allocator);
+                defer buf.deinit();
+
+                var bytes: usize = 0;
+                read_items: while (true) {
+                    const next: Payload = (decode(Payload, reader, allocator) catch |err| switch (err) {
+                        error.EndOfStream => break :read_items,
+                        else => return err,
+                    }).unwrap(&bytes);
+
+                    buf.append(next);
+                }
+
+                return .{
+                    .bytes_read = bytes,
+                    .value = .{
+                        .items = .{
+                            .owned = .{
+                                .allocator = allocator,
+                                .items = try buf.toOwnedSlice(),
+                            },
+                        },
+                    },
+                };
             }
         }
 
-        pub fn value(self: anytype) ?@TypeOf(&self.*.some) {
-            return switch (self.*) {
-                .some => |*pld| pld,
-                .none => null,
-            };
-        }
-
-        pub fn format(self: Self, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-            if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
-            try switch (self) {
-                .some => |pld| std.fmt.format(writer, "{}", .{pld}),
-                .none => writer.writeAll("null"),
-            };
+        pub fn constSlice(self: *const Ctr) []const Payload {
+            return self.items.constSlice();
         }
     };
 }
 
-pub const Status = struct {
-    pub const Version = struct {
-        name: []const u8,
-        protocol: i32,
-    };
-
-    pub const Players = struct {
-        max: i32,
-        online: i32,
-        sample: []const PlayerSample,
-    };
-
-    pub const PlayerSample = struct {
-        name: []const u8,
-        uuid: []const u8,
-    };
-
-    version: Version,
-    players: Players,
-    description: []const u8,
-    favicon: []const u8,
-    enforcesSecureChat: bool,
-};
+pub const RemainingBytes = RestOfPacketArray(u8);
