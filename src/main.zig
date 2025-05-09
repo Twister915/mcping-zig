@@ -63,7 +63,7 @@ fn pingPrint(allocator: std.mem.Allocator, target: Target) !void {
 
     std.debug.print("{?d}ms {s}\n", .{
         response.latency_ms,
-        response.status_response_packet.status.constSlice(),
+        response.status_response_packet.packet.status,
     });
 }
 
@@ -79,7 +79,7 @@ const Profile = struct {
 };
 
 const PingResponse = struct {
-    status_response_packet: CraftPacket.StatusResponsePacket,
+    status_response_packet: CraftConn.DecodedPkt(CraftPacket.StatusResponsePacket),
     latency_ms: ?i64 = null,
 
     const Self = @This();
@@ -94,22 +94,25 @@ fn ping(allocator: std.mem.Allocator, target: Target) !PingResponse {
     defer conn.deinit();
 
     _ = try conn.writePacket(0x00, CraftPacket.HandshakingPacket{
-        .version = @enumFromInt(target.protocol_version),
-        .address = .init(target.host),
+        .version = target.protocol_version,
+        .address = target.host,
         .port = target.port,
         .next_state = .status,
     });
 
-    _ = try conn.writePacket(0x00, .{});
+    _ = try conn.writePacket(0x00, {});
     // we return this packet in PingResponse, so the caller to ping owns the memory allocated by decoding this packet
-    const status_response_packet = try (try conn.readPacket()).decodeAs(allocator, CraftPacket.StatusResponsePacket);
+    const status_response_packet = try (try conn.readPacket()).decodeAs(CraftPacket.StatusResponsePacket, allocator);
 
     const ping_at_ms = std.time.milliTimestamp();
-    _ = try conn.writePacket(0x01, CraftPacket.StatusPingPongPacket{
-        .timestamp = ping_at_ms,
-    });
+    _ = try conn.writePacket(0x01, CraftPacket.StatusPingPongPacket{ .timestamp = ping_at_ms });
 
-    const pong_ts = (try (try conn.readPacket()).decodeAs(allocator, CraftPacket.StatusPingPongPacket)).timestamp;
+    const pong_ts = do_pong: {
+        const pong_packet = try (try conn.readPacket()).decodeAs(CraftPacket.StatusPingPongPacket, allocator);
+        defer pong_packet.deinit();
+        break :do_pong pong_packet.packet.timestamp;
+    };
+
     var out: PingResponse = .{ .status_response_packet = status_response_packet };
     if (pong_ts == ping_at_ms) {
         const pong_rcv_at = std.time.milliTimestamp();
@@ -123,9 +126,9 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile) 
     defer conn.deinit();
     // state = handshaking
     _ = try conn.writePacket(0x00, CraftPacket.HandshakingPacket{
-        .address = .init(target.host),
+        .address = target.host,
         .port = target.port,
-        .version = @enumFromInt(target.protocol_version),
+        .version = target.protocol_version,
         .next_state = .login,
     });
 
@@ -133,41 +136,43 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile) 
 
     // 0x00 LoginStart client ----> server
     _ = try conn.writePacket(0x00, CraftPacket.LoginStartPacket{
-        .name = .init(profile.username),
+        .name = profile.username,
         .uuid = profile.uuid,
     });
 
     login_state: while (true) {
         const login_packet = try conn.readPacket();
-        switch (@intFromEnum(login_packet.id)) {
+        switch (login_packet.id) {
             0x00 => {
-                const disconnect_packet = try login_packet.decodeAs(allocator, CraftPacket.DisconnectPacket);
+                const disconnect_packet = try login_packet.decodeAs(CraftPacket.DisconnectPacket, allocator);
                 defer disconnect_packet.deinit();
 
-                std.debug.print("disconnected from {s} ---> {s}\n", .{ target.host, disconnect_packet.reason.constSlice() });
+                std.debug.print("disconnected from {s} ---> {s}\n", .{ target.host, disconnect_packet.packet.reason });
                 return error.Disconnected;
             },
             0x01 => {
                 // encryption request
-                const encryption_request_packet = try login_packet.decodeAs(allocator, CraftPacket.EncryptionRequestPacket);
+                const encryption_request_packet = try login_packet.decodeAs(CraftPacket.EncryptionRequestPacket, allocator);
                 defer encryption_request_packet.deinit();
 
-                std.debug.print("encryption requested ({}), not supported!\n", .{encryption_request_packet});
+                std.debug.print("encryption requested ({}), not supported!\n", .{encryption_request_packet.packet});
                 return error.EncryptionRequested;
             },
             0x02 => {
                 // login success
-                const login_success_packet = try login_packet.decodeAs(allocator, CraftPacket.LoginSuccessPacket);
+                const login_success_packet = try login_packet.decodeAs(CraftPacket.LoginSuccessPacket, allocator);
                 defer login_success_packet.deinit();
 
                 // send login acknowledged
-                _ = try conn.writePacket(0x03, .{});
+                _ = try conn.writePacket(0x03, {});
                 break :login_state;
             },
             0x03 => {
                 // set compression
-                const set_compression_packet = try login_packet.decodeAs(allocator, CraftPacket.SetCompressionPacket);
-                try conn.setCompressionThreshold(@intCast(@intFromEnum(set_compression_packet.threshold)));
+                const set_compression_packet = try login_packet.decodeAs(CraftPacket.SetCompressionPacket, allocator);
+                defer set_compression_packet.deinit();
+
+                try conn.setCompressionThreshold(@intCast(set_compression_packet.packet.threshold));
             },
             0x04 => {
                 // login plugin message
@@ -180,25 +185,25 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile) 
                 //
                 // so that's what I'm going to do... send empty LoginPluginResponsePacket
 
-                const ping_request_packet = try login_packet.decodeAs(allocator, CraftPacket.LoginPluginRequestPacket);
+                const ping_request_packet = try login_packet.decodeAs(CraftPacket.LoginPluginRequestPacket, allocator);
                 defer ping_request_packet.deinit();
 
                 // login plugin response = 0x02
                 _ = try conn.writePacket(0x02, CraftPacket.LoginPluginResponsePacket{
-                    .message_id = ping_request_packet.message_id,
-                    .data = .EMPTY,
+                    .message_id = ping_request_packet.packet.message_id,
+                    .data = null,
                 });
             },
             0x05 => {
                 // cookie request
                 // we don't have cookie storage yet, so let's just send back an empty cookie packet
 
-                const cookie_request_packet = try login_packet.decodeAs(allocator, CraftPacket.LoginCookieRequestPacket);
+                const cookie_request_packet = try login_packet.decodeAs(CraftPacket.LoginCookieRequestPacket, allocator);
                 defer cookie_request_packet.deinit();
 
                 _ = try conn.writePacket(0x04, CraftPacket.LoginCookieResponsePacket{
-                    .key = cookie_request_packet.key.borrow(), // borrow so we don't deinit twice
-                    .payload = .EMPTY,
+                    .key = cookie_request_packet.packet.key, // borrow so we don't deinit twice
+                    .payload = null,
                 });
             },
             else => |other_id| {

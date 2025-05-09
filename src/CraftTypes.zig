@@ -2,10 +2,10 @@ const std = @import("std");
 
 pub const MAX_PACKET_SIZE: usize = 0x1FFFFF;
 
-pub fn encode(data: anytype, writer: anytype) !usize {
+pub fn encode(data: anytype, writer: anytype, comptime encoding: Encoding(@TypeOf(data))) !usize {
     const Data = @TypeOf(data);
     if (std.meta.hasFn(Data, "craftEncode")) {
-        return data.craftEncode(writer);
+        return data.craftEncode(writer, encoding);
     }
 
     if (Data == u8) {
@@ -18,22 +18,22 @@ pub fn encode(data: anytype, writer: anytype) !usize {
     }
 
     return switch (@typeInfo(Data)) {
-        .int => encodeInt(data, writer),
-        .bool => encode(@as(u8, if (data) 1 else 0), writer),
+        .int => encodeInt(data, writer, encoding),
+        .bool => encode(@as(u8, if (data) 1 else 0), writer, {}),
         .float => encodeFloat(data, writer),
-        .pointer => |Ptr| encodePointer(Ptr, data, writer),
-        .@"struct" => |S| encodeStruct(S, data, writer),
-        .array => |A| encodeArray(A, data, writer),
-        .optional => encodeOptional(data, writer),
-        .@"enum" => |E| encodeEnum(E, data, writer),
-        .@"union" => |U| encodeUnion(U, data, writer),
+        .pointer => |Ptr| encodePointer(Ptr, data, writer, encoding),
+        .@"struct" => |S| encodeStruct(S, data, writer, encoding),
+        .array => |A| encodeArray(A, data, writer, encoding),
+        .optional => encodeOptional(data, writer, encoding),
+        .@"enum" => encodeEnum(data, writer, encoding),
+        .@"union" => encodeUnion(data, writer, encoding),
         else => @compileError(@typeName(Data) ++ " cannot be craft encoded"),
     };
 }
 
-pub fn decode(comptime Data: type, reader: anytype, allocator: std.mem.Allocator) !Decoded(Data) {
+pub fn decode(comptime Data: type, reader: anytype, allocator: std.mem.Allocator, comptime encoding: Encoding(Data)) !Decoded(Data) {
     if (std.meta.hasFn(Data, "craftDecode")) {
-        return Data.craftDecode(reader, allocator);
+        return Data.craftDecode(reader, allocator, encoding);
     }
 
     if (Data == u8) {
@@ -43,60 +43,210 @@ pub fn decode(comptime Data: type, reader: anytype, allocator: std.mem.Allocator
         };
     }
 
-    if (@sizeOf(Data) == 0) {
-        return 0;
+    if (Data == void) {
+        return .{ .bytes_read = 0, .value = {} };
     }
 
     return switch (@typeInfo(Data)) {
-        .int => decodeInt(Data, reader),
+        .int => decodeInt(Data, reader, encoding),
         .bool => decodeBool(reader),
         .float => decodeFloat(Data, reader),
-        .pointer => |Ptr| decodePointer(Ptr, Data, reader, allocator),
-        .@"struct" => |S| decodeStruct(S, Data, reader, allocator),
-        .array => |A| decodeArray(A, Data, reader, allocator),
-        .optional => |Opt| decodeOptional(Opt, Data, reader, allocator),
-        .@"enum" => |E| decodeEnum(E, Data, reader, allocator),
-        .@"union" => |U| decodeUnion(U, Data, reader, allocator),
+        .pointer => decodePointer(Data, reader, allocator, encoding),
+        .@"struct" => decodeStruct(Data, reader, allocator, encoding),
+        .array => |A| decodeArray(A, Data, reader, allocator, encoding),
+        .optional => decodeOptional(Data, reader, allocator, encoding),
+        .@"enum" => decodeEnum(Data, reader, allocator, encoding),
+        .@"union" => decodeUnion(Data, reader, allocator, encoding),
         else => @compileError(@typeName(Data) ++ " cannot be craft decoded"),
     };
 }
 
-pub const VarInt = enum(i32) {
-    _,
+pub const VAR_INT_BYTES: usize = 5;
+pub const VAR_LONG_BYTES: usize = 10;
 
-    pub usingnamespace AutoVarNum(@This());
+pub fn varNumLength(num: anytype) usize {
+    const T = @TypeOf(num);
+    switch (@typeInfo(T)) {
+        .int => |I| {
+            return std.math.divCeil(usize, @intCast(I.bits - @clz(num)), 7) catch unreachable;
+        },
+        else => @compileError(@typeName(T) ++ " is not an integer type"),
+    }
+}
+
+pub const IntEncoding = enum {
+    default,
+    varnum,
 };
-pub const VarLong = enum(i64) {
-    _,
 
-    pub usingnamespace AutoVarNum(@This());
-};
+pub fn Encoding(comptime Payload: type) type {
+    if (Payload == u8) {
+        return void;
+    }
 
-fn AutoVarNum(comptime Wrapper: type) type {
-    return struct {
-        pub const Int = @typeInfo(Wrapper).@"enum".tag_type;
-        pub const BIT_SIZE = @typeInfo(Int).int.bits;
-        pub const BYTE_SIZE = std.math.divCeil(usize, BIT_SIZE, 7) catch unreachable;
-
-        pub fn craftEncode(data: Wrapper, writer: anytype) !usize {
-            return encodeVarnum(@intFromEnum(data), writer);
-        }
-
-        pub fn craftDecode(reader: anytype, _: std.mem.Allocator) !Decoded(Wrapper) {
-            return decodeVarnum(Wrapper, reader);
-        }
-
-        pub fn length(value: Wrapper) usize {
-            return @max(
-                1,
-                std.math.divCeil(
-                    usize,
-                    @as(usize, @intCast(BIT_SIZE)) - @clz(@intFromEnum(value)),
-                    7,
-                ) catch unreachable,
-            );
-        }
+    return switch (@typeInfo(Payload)) {
+        .int => IntEncoding,
+        .bool, .void, .float => void,
+        .@"struct" => StructEncoding(Payload),
+        .pointer => PointerEncoding(Payload),
+        .@"union" => UnionEncoding(Payload),
+        .@"enum" => EnumEncoding(Payload),
+        .optional => |O| Encoding(O.child),
+        else => @compileError(@typeName(Payload) ++ " cannot have encoding specified"),
     };
+}
+
+fn defaultEncoding(comptime Payload: type) ?*const anyopaque {
+    const E = Encoding(Payload);
+    if (E == void) {
+        return &{};
+    }
+
+    const type_info = @typeInfo(Payload);
+    switch (type_info) {
+        .@"struct", .@"union", .@"enum" => {
+            if (@hasDecl(Payload, "ENCODING")) {
+                return &Payload.ENCODING;
+            }
+        },
+        else => {},
+    }
+
+    switch (type_info) {
+        .int => return &IntEncoding.default,
+        .@"enum" => return defaultEncoding(WireTagFor(E)),
+        .@"struct", .@"union", .pointer, .optional => {
+            const DEFAULT_ENCODING: E = .{};
+            return &DEFAULT_ENCODING;
+        },
+        else => @compileError("no default encoding computable for " ++ @typeName(Payload)),
+    }
+}
+
+fn StructEncoding(comptime Struct: type) type {
+    if (@hasDecl(Struct, "CraftEncoding")) {
+        return Struct.CraftEncoding;
+    }
+
+    const S = @typeInfo(Struct).@"struct";
+
+    comptime var encoding_fields: [S.fields.len]std.builtin.Type.StructField = undefined;
+    for (S.fields, &encoding_fields) |struct_field, *encoding_field| {
+        const StructFieldEncoding = Encoding(struct_field.type);
+        encoding_field.* = .{
+            .name = struct_field.name,
+            .type = StructFieldEncoding,
+            .default_value_ptr = defaultEncoding(struct_field.type),
+            .is_comptime = false,
+            .alignment = @alignOf(StructFieldEncoding),
+        };
+    }
+
+    const EncodingStruct: std.builtin.Type = .{ .@"struct" = .{
+        .layout = .auto,
+        .fields = &encoding_fields,
+        .decls = &.{},
+        .is_tuple = false,
+    } };
+
+    return @Type(EncodingStruct);
+}
+
+pub const LengthPrefixMode = union(enum) {
+    disabled,
+    enabled: LengthPrefixEncoding,
+};
+
+pub const LengthPrefixEncoding = struct {
+    bits: usize,
+    encoding: IntEncoding = .default,
+
+    pub fn Counter(comptime encoding: @This()) type {
+        return @Type(.{ .int = .{
+            .bits = encoding.bits,
+            .signedness = .signed,
+        } });
+    }
+};
+
+pub const DEFAULT_LENGTH_PREFIX_ENCODING: LengthPrefixMode = .{ .enabled = .{
+    .bits = 32,
+    .encoding = .varnum,
+} };
+
+fn PointerEncoding(comptime P: type) type {
+    const Ptr = @typeInfo(P).pointer;
+    switch (Ptr.size) {
+        .one => return Encoding(Ptr.child),
+        .many, .slice => {
+            // covers: []T, [*]T, [:senti]T, [*:senti]T
+            if (Ptr.size == .many and Ptr.sentinel() == null) {
+                @compileError("cannot encode " ++ @typeName(P) ++ " because has no known size (use sentinel or slice)");
+            }
+
+            const ItemsEncoding = Encoding(Ptr.child);
+            return struct {
+                length_prefix: LengthPrefixMode = DEFAULT_LENGTH_PREFIX_ENCODING,
+                items: ItemsEncoding = @as(*const ItemsEncoding, @ptrCast(@alignCast(defaultEncoding(Ptr.child)))).*,
+            };
+        },
+        else => @compileError("unable to describe encoding for " ++ @typeName(P)),
+    }
+}
+
+fn UnionEncoding(comptime U: type) type {
+    const Tag = WireTagFor(U);
+    const TagEncoding = Encoding(Tag);
+    const FieldsEncoding = UnionFieldsEncoding(U);
+
+    return struct {
+        tag: TagEncoding = @as(*const TagEncoding, @ptrCast(@alignCast(defaultEncoding(Tag)))).*,
+        fields: FieldsEncoding = .{},
+    };
+}
+
+fn UnionFieldsEncoding(comptime U: type) type {
+    const Union = @typeInfo(U).@"union";
+    comptime var encoding_fields: [Union.fields.len]std.builtin.Type.StructField = undefined;
+    for (Union.fields, &encoding_fields) |union_field, *encoding_field| {
+        const FieldEncoding = Encoding(union_field.type);
+        encoding_field.* = .{
+            .name = union_field.name,
+            .type = FieldEncoding,
+            .default_value_ptr = defaultEncoding(union_field.type),
+            .is_comptime = false,
+            .alignment = @alignOf(FieldEncoding),
+        };
+    }
+
+    const EncodingStruct: std.builtin.Type = .{ .@"struct" = .{
+        .layout = .auto,
+        .fields = &encoding_fields,
+        .decls = &.{},
+        .is_tuple = false,
+    } };
+
+    return @Type(EncodingStruct);
+}
+
+fn EnumEncoding(comptime E: type) type {
+    return Encoding(WireTagFor(E));
+}
+
+// for an int type such as u16, i16, u32, i32, etc... let's just write it as big endian on the wire
+fn encodeInt(data: anytype, writer: anytype, comptime encoding: Encoding(@TypeOf(data))) !usize {
+    // all of this is calculated at comptime
+    const Int = comptime @TypeOf(data);
+
+    switch (encoding) {
+        .default => {
+            const NUM_BITS = comptime @bitSizeOf(Int);
+            const BYTES = comptime std.math.divExact(usize, NUM_BITS, 8) catch @compileError(@typeName(Int) ++ " is not byte sized (divisible by 8), cannot encode");
+            try writer.writeInt(Int, data, .big);
+            return BYTES;
+        },
+        .varnum => return encodeVarnum(data, writer),
+    }
 }
 
 // "var num" such as VarInt, VarLong
@@ -114,25 +264,13 @@ fn encodeVarnum(data: anytype, writer: anytype) !usize {
         if (has_more) {
             b |= 0x80;
         }
-        bytes += try encode(b, writer);
+        bytes += try encode(b, writer, {});
         if (!has_more) {
             return bytes;
         } else if (bytes >= MAX_BYTES) {
             return error.VarNumTooLarge;
         }
     }
-}
-
-// for an int type such as u16, i16, u32, i32, etc... let's just write it as big endian on the wire
-fn encodeInt(data: anytype, writer: anytype) !usize {
-    // all of this is calculated at comptime
-    const Int = comptime @TypeOf(data);
-    const NUM_BITS = comptime @bitSizeOf(Int);
-    const BYTES = comptime std.math.divExact(usize, NUM_BITS, 8) catch @compileError(@typeName(Int) ++ " is not byte sized (divisible by 8), cannot encode");
-
-    try writer.writeInt(Int, data, .big);
-
-    return BYTES;
 }
 
 fn encodeFloat(data: anytype, writer: anytype) !usize {
@@ -157,27 +295,29 @@ fn encodeFloat(data: anytype, writer: anytype) !usize {
     } });
 
     // convert the raw bits of the float into the int type, then call encodeInt on that
-    return encodeInt(@as(AsInt, @bitCast(data)), writer);
+    return encodeInt(@as(AsInt, @bitCast(data)), writer, .default);
 }
 
-fn encodeOptional(data: anytype, writer: anytype) !usize {
+fn encodeOptional(data: anytype, writer: anytype, comptime encoding: Encoding(@TypeOf(data))) !usize {
     if (data) |payload| {
-        return try encode(true, writer) + try encode(payload, writer);
+        return try encode(true, writer, {}) + try encode(payload, writer, encoding);
     } else {
-        return try encode(false, writer);
+        return try encode(false, writer, {});
     }
 }
 
 // for a struct, let's just encode each field in the order it's declared
-fn encodeStruct(comptime S: std.builtin.Type.Struct, data: anytype, writer: anytype) !usize {
+fn encodeStruct(comptime S: std.builtin.Type.Struct, data: anytype, writer: anytype, comptime encoding: Encoding(@TypeOf(data))) !usize {
     var bytes: usize = 0;
-    inline for (S.fields) |Field| {
-        bytes += try encode(@field(data, Field.name), writer);
+    inline for (S.fields) |struct_field| {
+        const field_data = @field(data, struct_field.name);
+        const field_encoding = @field(encoding, struct_field.name);
+        bytes += try encode(field_data, writer, field_encoding);
     }
     return bytes;
 }
 
-fn encodePointer(comptime Ptr: std.builtin.Type.Pointer, data: anytype, writer: anytype) !usize {
+fn encodePointer(comptime Ptr: std.builtin.Type.Pointer, data: anytype, writer: anytype, comptime encoding: Encoding(@TypeOf(data))) !usize {
     const P = comptime @TypeOf(data);
 
     switch (Ptr.size) {
@@ -187,11 +327,11 @@ fn encodePointer(comptime Ptr: std.builtin.Type.Pointer, data: anytype, writer: 
                     // *[N]T, can become []const T
                     const Elem: type = std.meta.Elem(Ptr.child);
                     const ConstSlice: type = []const Elem;
-                    return encode(@as(ConstSlice, data));
+                    return encode(@as(ConstSlice, data), writer, encoding);
                 },
                 else => {
                     // *T
-                    return encode(data.*, writer);
+                    return encode(data.*, writer, encoding);
                 },
             }
         },
@@ -215,73 +355,105 @@ fn encodePointer(comptime Ptr: std.builtin.Type.Pointer, data: anytype, writer: 
             //
             const slice = if (Ptr.size == .many) std.mem.span(data) else data;
 
+            var bytes: usize = 0;
+            // length prefixing
+            const lp_mode: LengthPrefixMode = encoding.length_prefix;
+            switch (lp_mode) {
+                .enabled => |lp| {
+                    const Counter = lp.Counter();
+                    const counter: Counter = @as(Counter, @intCast(slice.len));
+                    bytes += try encode(counter, writer, lp.encoding);
+                },
+                else => {},
+            }
+
             // []u8, []const u8, etc
             if (Ptr.child == u8) {
                 try writer.writeAll(slice);
-                return slice.len;
+                bytes += slice.len;
             } else {
                 // and now with either []T or []const T, we can iterate over the items and encode
-                var bytes: usize = 0;
                 for (slice) |item| {
-                    bytes += try encode(item, writer);
+                    bytes += try encode(item, writer, encoding.items);
                 }
-                return bytes;
             }
+
+            return bytes;
         },
         else => @compileError(@typeName(P) ++ " cannot be encoded because it is not supported"),
     }
 }
 
 // for a fixed size array, I guess I will just write each item independently
-fn encodeArray(comptime A: std.builtin.Type.Array, data: anytype, writer: anytype) !usize {
+fn encodeArray(comptime A: std.builtin.Type.Array, data: anytype, writer: anytype, encoding: Encoding(@TypeOf(data))) !usize {
     var bytes: usize = 0;
     inline for (0..A.len) |idx| {
-        bytes += try encode(data[idx], writer);
+        bytes += try encode(data[idx], writer, encoding);
     }
     return bytes;
 }
 
-fn encodeEnum(comptime E: std.builtin.Type.Enum, data: anytype, writer: anytype) !usize {
-    const Enum = comptime @TypeOf(data);
-    const Tag = comptime E.tag_type;
+const CRAFT_TAG_FN_NAME = "craftTag";
 
-    const encode_tag_fn_name = "craftEncodeTag";
-    if (std.meta.hasFn(Enum, encode_tag_fn_name)) {
-        const fn_handle = @field(Enum, encode_tag_fn_name);
-        const fn_info = @typeInfo(@TypeOf(fn_handle)).@"fn";
-        // fn could accept the enum type itself, or it could accept the tag type
-        if (fn_info.params.len != 1) {
-            @compileError(@typeName(Enum) ++ "." ++ encode_tag_fn_name ++ " must declare exactly one parameter");
-        }
-
-        const param0_type = fn_info.params[0].type.?;
-        switch (param0_type) {
-            Enum => return encode(@call(.auto, fn_handle, .{data}), writer),
-            Tag => return encode(@call(.auto, fn_handle, .{@intFromEnum(data)}), writer),
-            else => @compileError("cannot use " ++ @typeName(Enum) ++ "." ++ encode_tag_fn_name ++ "(" ++ @typeName(param0_type) ++ ") because parameter type is not supported"),
-        }
-    } else {
-        return encode(@intFromEnum(data), writer);
+// Given some tagged union or enum type, this will return the type of the tag we will serialize.
+//
+// Wire refers to "on the wire," as in "the bytes we will write on the wire to / from the craft peer."
+//
+// In the trivial case, the returned type is just the integer tag type associated with "Tagged."
+//
+// However, we support override of the tag for an enum. You can define a function called craftTag
+// on your custom enum, which returns any type. This will be the data that is serialized to the
+// server.
+//
+fn WireTagFor(comptime Tagged: type) type {
+    // calculate the tag
+    const type_info = @typeInfo(Tagged);
+    switch (type_info) {
+        // if it's an enum, then the tag_type will be the corresponding integer type
+        .@"enum" => |E| {
+            // check if override function is available
+            if (std.meta.hasFn(Tagged, CRAFT_TAG_FN_NAME)) {
+                return @typeInfo(@TypeOf(@field(Tagged, CRAFT_TAG_FN_NAME))).@"fn".return_type;
+            }
+            return E.tag_type;
+        },
+        // if it's a union, then it must have an enum tag type associated
+        .@"union" => |U| {
+            if (U.tag_type) |UnionTag| {
+                return WireTagFor(UnionTag);
+            } else {
+                @compileError("untagged union " ++ @typeName(Tagged) ++ " cannot be encoded / decoded");
+            }
+        },
+        else => @compileError("WireTagForEnum only applicable to enum / union, cannot determine tag for " ++ @tagName(Tagged)),
     }
 }
 
-fn encodeUnion(comptime U: std.builtin.Type.Union, data: anytype, writer: anytype) !usize {
-    comptime {
-        if (U.tag_type) |UnionTag| {
-            const tag_enum_info = @typeInfo(UnionTag).@"enum";
-            if (!tag_enum_info.is_exhaustive) {
-                @compileError("union tag type " ++ @typeName(tag_enum_info.tag_type) ++ " is not exhaustive for union " ++ @typeName(@TypeOf(data)) ++ ". Cannot implement encode.");
+// gets the actual tag value to serialize for some given enum
+fn getWireTag(data: anytype) WireTagFor(@TypeOf(data)) {
+    const T = @TypeOf(data);
+    switch (@typeInfo(T)) {
+        .@"enum" => |E| {
+            if (std.meta.hasFn(T, CRAFT_TAG_FN_NAME)) {
+                return @call(.auto, @field(data, CRAFT_TAG_FN_NAME), .{data});
+            } else {
+                return @as(E.tag_type, @intFromEnum(data));
             }
-        } else {
-            @compileError("cannot encode union " ++ @typeName(@TypeOf(data)) ++ " because it is not a tagged union");
-        }
+        },
+        else => @compileError("no associated wire tag for type " ++ @typeName(T)),
     }
+}
 
+fn encodeEnum(data: anytype, writer: anytype, comptime encoding: Encoding(@TypeOf(data))) !usize {
+    return encode(getWireTag(data), writer, encoding);
+}
+
+fn encodeUnion(data: anytype, writer: anytype, comptime encoding: Encoding(@TypeOf(data))) !usize {
     switch (data) {
         inline else => |d, tag| {
             var bytes: usize = 0;
-            bytes += try encode(tag, writer);
-            bytes += try encode(d, writer);
+            bytes += try encode(tag, writer, encoding.tag);
+            bytes += try encode(d, writer, @field(encoding.fields, @tagName(tag)));
             return bytes;
         },
     }
@@ -302,45 +474,35 @@ pub fn Decoded(comptime T: type) type {
     };
 }
 
+fn decodeInt(comptime Int: type, reader: anytype, comptime encoding: IntEncoding) !Decoded(Int) {
+    switch (encoding) {
+        .default => {
+            const NUM_BITS = comptime @bitSizeOf(Int);
+            const BYTES = comptime std.math.divExact(usize, NUM_BITS, 8) catch @compileError(@typeName(Int) ++ " is not byte sized (divisible by 8), cannot encode");
+
+            const decoded: Int = try reader.readInt(Int, .big);
+            return .{ .bytes_read = BYTES, .value = decoded };
+        },
+        .varnum => return decodeVarnum(Int, reader),
+    }
+}
+
 fn decodeVarnum(comptime VarNum: type, reader: anytype) !Decoded(VarNum) {
     const BIT_SIZE = comptime @bitSizeOf(VarNum);
     const MAX_BYTES = comptime std.math.divCeil(usize, BIT_SIZE, 7) catch unreachable;
-    comptime {
-        switch (@typeInfo(VarNum)) {
-            .@"enum" => {},
-            else => @compileError("var num must be enum with integer tag"),
-        }
-    }
-
-    const Int = comptime @typeInfo(VarNum).@"enum".tag_type;
-    comptime {
-        switch (@typeInfo(Int)) {
-            .int => {},
-            else => @compileError("var num must be enum with integer tag"),
-        }
-    }
-
-    var decoded: Int = 0;
+    var decoded: VarNum = 0;
     var bytes: usize = 0;
     while (true) {
         const b: u8 = try reader.readByte();
-        const data: Int = @intCast(b & 0x7F);
+        const data: VarNum = @intCast(b & 0x7F);
         decoded |= data << @intCast(7 * bytes);
         bytes += 1;
         if ((b & 0x80) == 0) {
-            return .{ .bytes_read = bytes, .value = @enumFromInt(decoded) };
+            return .{ .bytes_read = bytes, .value = decoded };
         } else if (bytes >= MAX_BYTES) {
             return error.VarNumTooLong;
         }
     }
-}
-
-fn decodeInt(comptime Int: type, reader: anytype) !Decoded(Int) {
-    const NUM_BITS = comptime @bitSizeOf(Int);
-    const BYTES = comptime std.math.divExact(usize, NUM_BITS, 8) catch @compileError(@typeName(Int) ++ " is not byte sized (divisible by 8), cannot encode");
-
-    const decoded: Int = try reader.readInt(Int, .big);
-    return .{ .bytes_read = BYTES, .value = decoded };
 }
 
 fn decodeBool(reader: anytype) !Decoded(bool) {
@@ -373,26 +535,108 @@ fn decodeFloat(comptime Float: type, reader: anytype) !Decoded(Float) {
         .signedness = .unsigned,
     } });
 
-    const intDecoded: Decoded(AsInt) = try decodeInt(AsInt, reader);
+    const intDecoded: Decoded(AsInt) = try decodeInt(AsInt, reader, .default);
     const f = @as(Float, @bitCast(intDecoded));
     return .{ .bytes_read = intDecoded.bytes_read, .value = f };
 }
 
-fn decodePointer(comptime _: std.builtin.Type.Pointer, comptime Data: type, _: anytype, _: std.mem.Allocator) !Decoded(Data) {
-    @compileError("cannot decode " ++ @typeName(Data));
-    // fn decodePointer(comptime Ptr: std.builtin.Type.Pointer, comptime Data: type, reader: anytype, allocator: std.mem.Allocator) !Decoded(Data) {
-    // const P = @TypeOf(Data);
-    // switch (Ptr.size) {
-    //     .one => {},
-    // }
+fn decodePointer(comptime Data: type, reader: anytype, allocator: std.mem.Allocator, comptime encoding: Encoding(Data)) !Decoded(Data) {
+    const Ptr = @typeInfo(Data).pointer;
+    const Payload = Ptr.child;
+    switch (Ptr.size) {
+        .one => {
+            // *T
+            const allocated_ptr: NonConstPointer(Data) = try allocator.create(Payload);
+            const decoded_payload = try decode(Payload, reader, allocator, encoding);
+            allocated_ptr.* = decoded_payload.value;
+            return .{ .bytes_read = decoded_payload.bytes_read, .value = allocated_ptr };
+        },
+        .many, .slice => {
+            var bytes: usize = 0;
+            var dst: NonConstPointer(Data) = undefined;
+
+            const length_prefix_mode: LengthPrefixMode = encoding.length_prefix;
+            switch (length_prefix_mode) {
+                .disabled => {
+                    // read until reader runs dry
+                    if (Payload == u8) {
+                        dst = try reader.readAllAlloc(allocator, MAX_PACKET_SIZE);
+                        bytes = dst.len;
+                    } else {
+                        @compileError(@typeName(Data) ++ " cannot be decoded without length prefix (unsupported, but TODO)");
+                    }
+                },
+                .enabled => |lp| {
+                    // decode the counter from the wire
+                    const Counter = lp.Counter();
+                    const count: usize = @intCast((try decode(Counter, reader, allocator, lp.encoding)).unwrap(&bytes));
+
+                    // use allocator to allocate a slice
+                    if (Ptr.size == .many) {
+                        if (Ptr.sentinel_ptr == null) {
+                            @compileError("cannot decode a many pointer without a sentinel, " ++ @typeName(Data) ++ " is not supported.");
+                        }
+
+                        const sentinel_value = Ptr.sentinel();
+                        dst = try allocator.allocSentinel(Payload, count, sentinel_value);
+                    } else {
+                        dst = try allocator.alloc(Payload, count);
+                    }
+
+                    // decode the sized data
+                    if (Payload == u8) {
+                        try reader.readNoEof(dst);
+                        bytes += count;
+                    } else {
+                        for (dst) |*item| {
+                            item.* = (try decode(Payload, reader, allocator, encoding.items)).unwrap(&bytes);
+                        }
+                    }
+                },
+            }
+            return .{
+                .bytes_read = bytes,
+                .value = dst,
+            };
+        },
+        else => @compileError("cannot decode " ++ @typeName(Data)),
+    }
 }
 
-fn decodeStruct(comptime S: std.builtin.Type.Struct, comptime Data: type, reader: anytype, allocator: std.mem.Allocator) !Decoded(Data) {
+fn NonConstPointer(comptime Slice: type) type {
+    const ptr_info = @typeInfo(Slice).pointer;
+    const T = ptr_info.child;
+    switch (ptr_info.size) {
+        .one => return *T,
+        .many => {
+            if (ptr_info.sentinel_ptr != null) {
+                const sentinel: T = ptr_info.sentinel().?;
+                return [*:sentinel]T;
+            } else {
+                @compileError(@typeName(Slice) ++ " does not have a sentinel or length, unsupported");
+            }
+        },
+        .slice => {
+            if (ptr_info.sentinel_ptr != null) {
+                const sentinel: T = ptr_info.sentinel().?;
+                return [:sentinel]T;
+            } else {
+                return []T;
+            }
+        },
+        else => @compileError(@typeName(Slice) ++ " is not supported"),
+    }
+}
+
+fn decodeStruct(comptime Data: type, reader: anytype, allocator: std.mem.Allocator, comptime encoding: Encoding(Data)) !Decoded(Data) {
+    const S = comptime @typeInfo(Data).@"struct";
     var decoded_value: Data = undefined;
     var bytes: usize = 0;
 
     inline for (S.fields) |Field| {
-        @field(decoded_value, Field.name) = (try decode(Field.type, reader, allocator)).unwrap(&bytes);
+        const field_encoding = @field(encoding, Field.name);
+        const field_dcd = try decode(Field.type, reader, allocator, field_encoding);
+        @field(decoded_value, Field.name) = field_dcd.unwrap(&bytes);
     }
 
     return .{
@@ -406,14 +650,15 @@ fn decodeArray(comptime _: std.builtin.Type.Array, comptime Data: type, _: anyty
     @compileError("cannot decode " ++ @typeName(Data));
 }
 
-fn decodeOptional(comptime Opt: std.builtin.Type.Optional, comptime Data: type, reader: anytype, allocator: std.mem.Allocator) !Decoded(Data) {
+fn decodeOptional(comptime Data: type, reader: anytype, allocator: std.mem.Allocator, comptime encoding: Encoding(Data)) !Decoded(Data) {
+    const Opt = comptime @typeInfo(Data).optional;
     var out: Decoded(Data) = undefined;
     out.bytes_read = 0;
 
-    const has_payload: bool = (try decode(bool, reader, allocator)).unwrap(&out.bytes_read);
+    const has_payload: bool = (try decode(bool, reader, allocator, {})).unwrap(&out.bytes_read);
 
     if (has_payload) {
-        out.value = (try decode(Opt.child, reader, allocator)).unwrap(&out.bytes_read);
+        out.value = (try decode(Opt.child, reader, allocator, encoding)).unwrap(&out.bytes_read);
     } else {
         out.value = null;
     }
@@ -421,420 +666,53 @@ fn decodeOptional(comptime Opt: std.builtin.Type.Optional, comptime Data: type, 
     return out;
 }
 
-fn decodeEnum(comptime E: std.builtin.Type.Enum, comptime Enum: type, reader: anytype, allocator: std.mem.Allocator) !Decoded(Enum) {
-    const Tag = E.tag_type;
-
-    // allow an enum to define a function craftDecodeTag(DeserializeType) Tag
-    //
-    // if this function is defined, we will deserialize the type of the first argument,
-    // then call craftDecodeTag with that value, and use the returned Tag with
-    // @enumFromInt
-    const decode_tag_fn_name = "craftDecodeTag";
-    if (std.meta.hasFn(Enum, decode_tag_fn_name)) {
-        const f = @field(Enum, decode_tag_fn_name);
-        const fn_info = @typeInfo(@TypeOf(f)).@"fn";
-        if (fn_info.params.len != 1) {
-            @compileError(@typeName(Enum) ++ "." ++ decode_tag_fn_name ++ "must accept exactly one parameter");
-        }
-
-        const WireTagType = fn_info.params[0].type.?;
-        const ReturnType = fn_info.return_type.?;
-
-        // decode a value, using the type of the first parameter for craftDecodeTag
-        const wire_tag_info: Decoded(WireTagType) = try decode(WireTagType, reader, allocator);
-        const bytes_read: usize = wire_tag_info.bytes_read;
-        const wire_tag: WireTagType = wire_tag_info.value;
-        defer if (std.meta.hasFn(WireTagType, "deinit")) {
-            wire_tag.deinit();
-        };
-
-        // call craftDecodeTag(WireTag) -> ??
-        const decoded_tag: ReturnType = @call(.auto, f, .{wire_tag});
-
-        // now try to interpret the ReturnType
-        const enum_value = calc_enum_value: {
-            switch (ReturnType) {
-                Tag => break :calc_enum_value (try std.meta.intToEnum(Enum, decoded_tag)),
-                Enum => break :calc_enum_value decoded_tag,
-                else => {
-                    switch (@typeInfo(ReturnType)) {
-                        .error_union => |EU| {
-                            const EUPld = EU.payload;
-                            const non_error: EUPld = try decoded_tag;
-                            switch (EUPld) {
-                                Tag => break :calc_enum_value try std.meta.intToEnum(Enum, non_error),
-                                Enum => break :calc_enum_value non_error,
-                                else => {},
-                            }
-                        },
-                        else => {},
-                    }
-                },
-            }
-
-            @compileError("return type " ++ @typeName(ReturnType) ++ " for " ++ @typeName(Enum) ++ "." ++ decode_tag_fn_name ++ " is not supported");
-        };
-        return .{ .value = enum_value, .bytes_read = bytes_read };
+fn decodeEnum(comptime Enum: type, reader: anytype, allocator: std.mem.Allocator, comptime encoding: Encoding(Enum)) !Decoded(Enum) {
+    const WireTag: type = WireTagFor(Enum);
+    const wire_tag_decoded: Decoded(WireTag) = try decode(WireTag, reader, allocator, encoding);
+    var decoded: Enum = undefined;
+    if (std.meta.hasFn(Enum, CRAFT_TAG_FN_NAME)) {
+        @compileError(CRAFT_TAG_FN_NAME ++ " is unsupported in decode TODO");
     } else {
-        const dcd = try decode(Tag, reader, allocator);
-        const converted: Enum = try std.meta.intToEnum(Enum, dcd.value);
-        return .{ .value = converted, .bytes_read = dcd.bytes_read };
+        decoded = try std.meta.intToEnum(Enum, wire_tag_decoded.value);
     }
-}
 
-fn decodeUnion(comptime U: std.builtin.Type.Union, comptime Union: type, reader: anytype, allocator: std.mem.Allocator) !Decoded(Union) {
-    if (U.tag_type) |UnionTag| {
-        var bytes: usize = 0;
-        // decode the tag (an int, of some kind)
-        const tag_decoded: UnionTag = (try decode(UnionTag, reader, allocator)).unwrap(&bytes);
-
-        const tag_enum_info = @typeInfo(UnionTag).@"enum";
-        const TagInt = tag_enum_info.tag_type;
-        inline for (U.fields, tag_enum_info.fields) |union_field, tag_variant| {
-            if (@as(TagInt, @intCast(tag_variant.value)) == @intFromEnum(tag_decoded)) {
-                const PayloadType = union_field.type;
-                const payload_decoded: PayloadType = (try decode(PayloadType, reader, allocator)).unwrap(&bytes);
-                const out = @unionInit(Union, union_field.name, payload_decoded);
-                return .{
-                    .bytes_read = bytes,
-                    .value = out,
-                };
-            }
-        }
-
-        return error.UnknownEnumVariant;
-    }
-    @compileError("union " ++ @typeName(Union) ++ " must be tagged to be decoded");
-}
-
-pub fn EnumTable(comptime Enum: type, comptime Item: type) type {
-    return [@typeInfo(Enum).@"enum".fields.len]Item;
-}
-
-pub fn CraftEncodeStrEnum(enum_value: anytype, comptime TABLE: EnumTable(@TypeOf(enum_value), []const u8)) String {
-    return String.init(TABLE[@intFromEnum(enum_value)]);
-}
-
-pub fn CraftDecodeStrEnum(comptime Enum: type, str: String, comptime TABLE: EnumTable(Enum, []const u8)) !Enum {
-    const str_slice = str.constSlice();
-    for (TABLE, 0..) |variant, idx| {
-        if (std.mem.eql(u8, variant, str_slice)) {
-            return @enumFromInt(idx);
-        }
-    }
-    return error.BadEnumVariant;
-}
-
-pub fn AutoStringEnum(comptime Enum: type) type {
-    return struct {
-        const STRINGS_TABLE = AutoEnumStringsTable(Enum);
-
-        pub fn craftEncodeTag(self: Enum) String {
-            return CraftEncodeStrEnum(self, STRINGS_TABLE);
-        }
-
-        pub fn craftDecodeTag(tag: String) !Enum {
-            return CraftDecodeStrEnum(Enum, tag, STRINGS_TABLE);
-        }
+    return .{
+        .value = decoded,
+        .bytes_read = wire_tag_decoded.bytes_read,
     };
 }
 
-pub fn AutoVarNumEnum(comptime Enum: type, comptime VarNum: type) type {
-    const TagType = @typeInfo(Enum).@"enum".tag_type;
-    return struct {
-        pub fn craftEncodeTag(self: TagType) VarNum {
-            return @enumFromInt(self);
-        }
-
-        pub fn craftDecodeTag(tag: VarNum) TagType {
-            return @intFromEnum(tag);
-        }
-    };
-}
-
-pub fn AutoEnumStringsTable(comptime Enum: type) [@typeInfo(Enum).@"enum".fields.len][]const u8 {
-    comptime {
-        var out: [@typeInfo(Enum).@"enum".fields.len][]const u8 = undefined;
-        for (@typeInfo(Enum).@"enum".fields, 0..) |Field, idx| {
-            out[idx] = Field.name;
-        }
-        return out;
+fn decodeUnion(comptime Union: type, reader: anytype, allocator: std.mem.Allocator, comptime encoding: Encoding(Union)) !Decoded(Union) {
+    const union_info = @typeInfo(Union).@"union";
+    if (union_info.tag_type == null) {
+        @compileError(@typeName(Union) ++ " is untagged and is unsupported");
     }
-}
 
-pub fn Cow(comptime Payload: type) type {
-    return union(enum) {
-        pub const Owned = struct {
-            ptr: *Payload,
-            allocator: std.mem.Allocator,
-        };
-
-        borrowed: *const Payload,
-        owned: Owned,
-
-        const Ctr = @This();
-
-        pub fn init(data: *const Payload) Ctr {
-            return .{ .borrowed = data };
-        }
-
-        pub fn borrow(ctr: Ctr) Ctr {
-            return .{ .borrowed = ctr.constPtr() };
-        }
-
-        pub fn deinit(ctr: Ctr) void {
-            switch (ctr) {
-                .owned => |o| {
-                    if (std.meta.hasFn(Payload, "deinit")) {
-                        o.ptr.*.deinit();
-                    }
-
-                    o.allocator.destroy(o.ptr);
-                },
-                .borrowed => {},
-            }
-        }
-
-        pub fn constPtr(ctr: Ctr) *const Payload {
-            return switch (ctr) {
-                .owned => |o| o.ptr,
-                .borrowed => |ptr| ptr,
-            };
-        }
-
-        pub fn craftEncode(ctr: Ctr, writer: anytype) !usize {
-            return encode(ctr.constPtr(), writer);
-        }
-
-        pub fn craftDecode(reader: anytype, allocator: std.mem.Allocator) !Decoded(Ctr) {
-            const owned_ptr: *Payload = try allocator.create(Payload);
-            const dcd = try decode(Payload, reader, allocator);
-            owned_ptr.* = dcd.value;
-            return .{
-                .value = .{
-                    .owned = .{
-                        .ptr = owned_ptr,
-                        .allocator = allocator,
-                    },
-                },
-                .bytes_read = dcd.bytes_read,
-            };
-        }
-    };
-}
-
-pub fn CowSlice(comptime Payload: type) type {
-    return union(enum) {
-        pub const Owned = struct {
-            ptr: []Payload,
-            allocator: std.mem.Allocator,
-        };
-
-        borrowed: []const Payload,
-        owned: Owned,
-
-        const Ctr = @This();
-
-        pub fn borrow(ctr: Ctr) Ctr {
-            return .{ .borrowed = ctr.constSlice() };
-        }
-
-        pub fn deinit(ctr: Ctr) void {
-            switch (ctr) {
-                .owned => |o| {
-                    if (std.meta.hasFn(Payload, "deinit")) {
-                        for (o.ptr) |item| {
-                            item.deinit();
-                        }
-                    }
-
-                    o.allocator.free(o.ptr);
-                },
-                else => {},
-            }
-        }
-
-        pub fn constSlice(ctr: *const Ctr) []const Payload {
-            return switch (ctr.*) {
-                .owned => |o| o.ptr,
-                .borrowed => |b| b,
-            };
-        }
-
-        pub fn craftEncode(ctr: Ctr, writer: anytype) !usize {
-            return encode(ctr.constSlice(), writer);
-        }
-
-        fn craftDecodeN(num: usize, reader: anytype, allocator: std.mem.Allocator) !Decoded(Ctr) {
-            const slice: []Payload = try allocator.alloc(Payload, num);
-            var bytes: usize = 0;
-            if (Payload == u8) {
-                try reader.readNoEof(slice);
-                bytes = slice.len;
-            } else {
-                for (0..num) |idx| {
-                    slice[idx] = (try decode(Payload, reader, allocator)).unwrap(&bytes);
-                }
-            }
+    const TagType: type = union_info.tag_type.?;
+    const tag_info = @typeInfo(TagType).@"enum";
+    var bytes: usize = 0;
+    const tag_value: TagType = (try decode(TagType, reader, allocator, encoding.tag)).unwrap(&bytes);
+    const tag_int: tag_info.tag_type = @intFromEnum(tag_value);
+    // todo is this the best way to deal with this?
+    inline for (union_info.fields, tag_info.fields) |union_field, enum_field| {
+        if (enum_field.value == tag_int) {
+            const Payload: type = union_field.type;
+            const payload_encoding: Encoding(Payload) = @field(encoding.fields, enum_field.name);
+            const payload: Payload = (try decode(Payload, reader, allocator, payload_encoding)).unwrap(&bytes);
+            const out: Union = @unionInit(Union, union_field.name, payload);
             return .{
                 .bytes_read = bytes,
-                .value = .{
-                    .owned = .{
-                        .ptr = slice,
-                        .allocator = allocator,
-                    },
-                },
+                .value = out,
             };
         }
-    };
-}
+    }
 
-pub fn LengthPrefixed(comptime Counter: type, comptime Payload: type) type {
-    return struct {
-        items: ItemsSlice,
-
-        const Ctr = @This();
-        pub const EMPTY: Ctr = .init(&.{});
-        const ItemsSlice = CowSlice(Payload);
-
-        pub fn init(items: []const Payload) Ctr {
-            return .{ .items = .{ .borrowed = items } };
-        }
-
-        pub fn borrow(ctr: Ctr) Ctr {
-            return .{ .items = ctr.items.borrow() };
-        }
-
-        pub fn deinit(ctr: Ctr) void {
-            ctr.items.deinit();
-        }
-
-        pub fn craftEncode(ctr: Ctr, writer: anytype) !usize {
-            const items = ctr.constSlice();
-            var bytes: usize = 0;
-
-            bytes += try encode(@as(Counter, @enumFromInt(items.len)), writer);
-            bytes += try encode(ctr.items, writer);
-            return bytes;
-        }
-
-        pub fn craftDecode(reader: anytype, allocator: std.mem.Allocator) !Decoded(Ctr) {
-            var bytes: usize = 0;
-            const counter: Counter = (try decode(Counter, reader, allocator)).unwrap(&bytes);
-            const items: ItemsSlice = (try ItemsSlice.craftDecodeN(@intCast(@intFromEnum(counter)), reader, allocator)).unwrap(&bytes);
-            return .{ .bytes_read = bytes, .value = .{ .items = items } };
-        }
-
-        pub fn constSlice(ctr: *const Ctr) []const Payload {
-            return ctr.items.constSlice();
-        }
-    };
-}
-
-pub const String = LengthPrefixed(VarInt, u8);
-
-test "encode string" {
-    const test_data = "hello world";
-
-    const craft_str = String.init(test_data);
-    defer craft_str.deinit();
-
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-
-    const bytes_written = try encode(craft_str, buf.writer());
-    try std.testing.expectEqual(test_data.len + 1, bytes_written);
-    try std.testing.expectEqualSlices(u8, &.{
-        0x0B, // 11
-        0x68, 0x65, 0x6C, 0x6C, 0x6F, // hello
-        0x20, // space
-        0x77, 0x6F, 0x72, 0x6C, 0x64, // world
-    }, buf.items);
-}
-
-test "decode string" {
-    const test_data: []const u8 = &.{
-        0x0B, // 11
-        0x68, 0x65, 0x6C, 0x6C, 0x6F, // hello
-        0x20, // space
-        0x77, 0x6F, 0x72, 0x6C, 0x64, // world
-    };
-
-    var stream = std.io.fixedBufferStream(test_data);
-    const decoded = try decode(String, stream.reader(), std.testing.allocator);
-    const str_cow = decoded.value;
-    defer str_cow.deinit();
-    try std.testing.expectEqual(test_data.len, decoded.bytes_read);
-    const str: []const u8 = str_cow.constSlice();
-    try std.testing.expectEqualStrings("hello world", str);
-}
-
-test "handshaking packet" {
-    const HandshakingPacket = struct {
-        version: VarInt,
-        address: String,
-        port: u16,
-        nextState: enum(i32) {
-            status = 1,
-            login = 2,
-            transfer = 3,
-
-            pub usingnamespace AutoVarNumEnum(@This(), VarInt);
-        },
-
-        fn deinit(self: @This()) void {
-            self.address.deinit();
-        }
-    };
-
-    const pkt: HandshakingPacket = .{
-        .version = @enumFromInt(770),
-        .address = .init("localhost"),
-        .port = 25565,
-        .nextState = .status,
-    };
-
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-
-    const num_bytes = try encode(pkt, buf.writer());
-
-    var stream = std.io.fixedBufferStream(buf.items);
-    const decoded: Decoded(HandshakingPacket) = try decode(HandshakingPacket, stream.reader(), std.testing.allocator);
-    const hs_pkt_decoded = decoded.value;
-    defer hs_pkt_decoded.deinit();
-    const hs_bytes_read = decoded.bytes_read;
-
-    try std.testing.expectEqual(num_bytes, hs_bytes_read);
-    try std.testing.expectEqual(pkt.version, hs_pkt_decoded.version);
-    try std.testing.expectEqualStrings(pkt.address.constSlice(), hs_pkt_decoded.address.constSlice());
-    try std.testing.expectEqual(pkt.port, hs_pkt_decoded.port);
-    try std.testing.expectEqual(pkt.nextState, hs_pkt_decoded.nextState);
-}
-
-test "string enum" {
-    const NameTagVisibility = enum {
-        always,
-        hideForOtherTeams,
-        hideForOwnTeam,
-        never,
-
-        pub usingnamespace AutoStringEnum(@This());
-    };
-
-    // test encode and decode for "hideForOtherTeams" (should encode as the string "hideForOtherTeams")
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    const v: NameTagVisibility = .hideForOtherTeams;
-    _ = try encode(v, buf.writer());
-
-    var reader_stream = std.io.fixedBufferStream(buf.items);
-    const decoded: NameTagVisibility = (try decode(NameTagVisibility, reader_stream.reader(), std.testing.allocator)).unwrap(null);
-    try std.testing.expectEqual(v, decoded);
+    return error.InvalidEnumTag;
 }
 
 pub const UUID = struct {
     pub const NUM_BYTES: usize = 16;
+    pub const CraftEncoding = void;
 
     raw: [NUM_BYTES]u8,
 
@@ -858,12 +736,12 @@ pub const UUID = struct {
         try emitter.emit();
     }
 
-    pub fn craftEncode(uuid: UUID, writer: anytype) !usize {
+    pub fn craftEncode(uuid: UUID, writer: anytype, _: CraftEncoding) !usize {
         try writer.writeAll(&uuid.raw);
         return NUM_BYTES;
     }
 
-    pub fn craftDecode(reader: anytype, _: std.mem.Allocator) !Decoded(UUID) {
+    pub fn craftDecode(reader: anytype, _: std.mem.Allocator, _: CraftEncoding) !Decoded(UUID) {
         var out: UUID = undefined;
         try reader.readNoEof(&out.raw);
         return .{ .bytes_read = NUM_BYTES, .value = out };
@@ -1036,80 +914,7 @@ test "encode uuid" {
     defer buf.deinit();
 
     const id0 = UUID.random(std.crypto.random);
-    const bytes = try encode(id0, buf.writer());
+    const bytes = try encode(id0, buf.writer(), {});
     try std.testing.expectEqual(UUID.NUM_BYTES, bytes);
     try std.testing.expectEqualStrings(&id0.raw, buf.items);
 }
-
-pub fn RestOfPacketArray(comptime Payload: type) type {
-    return struct {
-        items: ItemSlice,
-
-        pub const ItemSlice = CowSlice(Payload);
-
-        const Ctr = @This();
-
-        pub const EMPTY: Ctr = .init(&.{});
-
-        pub fn init(in: []const Payload) Ctr {
-            return .{ .items = .{ .borrowed = in } };
-        }
-
-        pub fn deinit(self: Ctr) void {
-            self.items.deinit();
-        }
-
-        pub fn craftEncode(self: Ctr, writer: anytype) !usize {
-            return self.items.craftEncode(writer);
-        }
-
-        pub fn craftDecode(reader: anytype, allocator: std.mem.Allocator) !Decoded(Ctr) {
-            if (Payload == u8) {
-                // caller will end up owning this memory
-                const out: Ctr = .{
-                    .items = .{
-                        .owned = .{
-                            .ptr = (try reader.readAllAlloc(allocator, MAX_PACKET_SIZE)),
-                            .allocator = allocator,
-                        },
-                    },
-                };
-                return .{
-                    .bytes_read = out.constSlice().len,
-                    .value = out,
-                };
-            } else {
-                var buf = std.ArrayList(Payload).init(allocator);
-                defer buf.deinit();
-
-                var bytes: usize = 0;
-                read_items: while (true) {
-                    const next: Payload = (decode(Payload, reader, allocator) catch |err| switch (err) {
-                        error.EndOfStream => break :read_items,
-                        else => return err,
-                    }).unwrap(&bytes);
-
-                    buf.append(next);
-                }
-
-                return .{
-                    .bytes_read = bytes,
-                    .value = .{
-                        .items = .{
-                            .owned = .{
-                                .allocator = allocator,
-                                .items = try buf.toOwnedSlice(),
-                            },
-                        },
-                    },
-                };
-            }
-        }
-
-        pub fn constSlice(self: *const Ctr) []const Payload {
-            return self.items.constSlice();
-        }
-    };
-}
-
-pub const RemainingBytes = RestOfPacketArray(u8);

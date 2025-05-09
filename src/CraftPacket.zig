@@ -3,166 +3,215 @@ const CraftTypes = @import("CraftTypes.zig");
 
 // state = handshake
 pub const HandshakingPacket = struct {
-    version: CraftTypes.VarInt,
-    address: CraftTypes.String,
+    version: i32,
+    address: []const u8,
     port: u16,
     next_state: enum(i32) {
         status = 1,
         login = 2,
         transfer = 3,
-
-        pub usingnamespace CraftTypes.AutoVarNumEnum(@This(), CraftTypes.VarInt);
     },
 
-    pub fn deinit(self: @This()) void {
-        self.address.deinit();
-    }
+    const Encoding = CraftTypes.Encoding(@This());
+    pub const ENCODING: Encoding = .{
+        .version = .varnum,
+        .next_state = .varnum,
+    };
 };
+
+test "encode handshaking packet" {
+    const pkt: HandshakingPacket = .{
+        .version = 770,
+        .address = "rpi4.jhome",
+        .port = 25565,
+        .next_state = .status,
+    };
+
+    var buf = std.ArrayList(u8).init(std.testing.allocator);
+    defer buf.deinit();
+
+    _ = try CraftTypes.encode(pkt, buf.writer(), .{});
+    std.debug.print("\nin: {any}\nencoding: {any}\nout:{any}\n", .{ pkt, HandshakingPacket.ENCODING, buf.items });
+}
 
 // state = status
 pub const StatusResponsePacket = struct {
-    status: CraftTypes.String,
-
-    pub fn deinit(self: @This()) void {
-        self.status.deinit();
-    }
+    status: []const u8,
 };
 
 pub const StatusPingPongPacket = struct {
     timestamp: i64,
 };
 
-test "encode handshaking packet" {
-    const packet: HandshakingPacket = .{
-        .version = @enumFromInt(770),
-        .address = .init("localhost"),
-        .port = 25565,
-        .next_state = .status,
-    };
-    std.debug.print("version = {d}\n", .{packet.version});
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    _ = try CraftTypes.encode(packet, buf.writer());
-
-    var expected = std.ArrayList(u8).init(std.testing.allocator);
-    defer expected.deinit();
-
-    _ = try CraftTypes.encode(packet.version, expected.writer());
-    _ = try CraftTypes.encode(packet.address, expected.writer());
-    _ = try CraftTypes.encode(packet.port, expected.writer());
-    _ = try CraftTypes.encode(packet.next_state, expected.writer());
-
-    try std.testing.expectEqualSlices(u8, expected.items, buf.items);
-}
-
 // state = login
 pub const DisconnectPacket = struct {
-    reason: CraftTypes.String,
-
-    pub fn deinit(self: @This()) void {
-        self.reason.deinit();
-    }
+    reason: []const u8,
 };
 
 pub const EncryptionRequestPacket = struct {
-    server_id: CraftTypes.String,
-    public_key: CraftTypes.String, // bytes
-    verify_token: CraftTypes.String, // bytes
+    server_id: []const u8,
+    public_key: []const u8, // bytes
+    verify_token: []const u8, // bytes
     should_authenticate: bool,
-
-    pub fn deinit(self: @This()) void {
-        self.server_id.deinit();
-        self.public_key.deinit();
-        self.verify_token.deinit();
-    }
 };
 
 pub const LoginSuccessPacket = struct {
     uuid: CraftTypes.UUID,
-    username: CraftTypes.String,
-    properties: CraftTypes.LengthPrefixed(CraftTypes.VarInt, Property),
+    username: []const u8,
+    properties: []const Property,
 
     pub const Property = struct {
-        name: CraftTypes.String,
-        value: CraftTypes.String,
-        signature: ?CraftTypes.String,
-
-        pub fn deinit(self: @This()) void {
-            self.name.deinit();
-            self.value.deinit();
-            if (self.signature) |sig| {
-                sig.deinit();
-            }
-        }
+        name: []const u8,
+        value: []const u8,
+        signature: ?[]const u8,
     };
-
-    pub fn deinit(self: @This()) void {
-        self.username.deinit();
-        self.properties.deinit();
-    }
 };
 
+test "encode login success packet" {
+    const pkt: LoginSuccessPacket = .{
+        .uuid = CraftTypes.UUID.random(std.crypto.random),
+        .username = "Notch",
+        .properties = &.{
+            .{
+                .name = "coolness",
+                .value = "100",
+                .signature = null,
+            },
+            .{
+                .name = "is_founder",
+                .value = "true",
+                .signature = "signed by Notch",
+            },
+        },
+    };
+
+    var buf = std.ArrayList(u8).init(std.testing.allocator);
+    defer buf.deinit();
+
+    const login_success_encoding: CraftTypes.Encoding(LoginSuccessPacket) = .{};
+    _ = try CraftTypes.encode(pkt, buf.writer(), login_success_encoding);
+    std.debug.print("\nin: {any}\nencoding: {any}\nout:{any}\n", .{ pkt, login_success_encoding, buf.items });
+}
+
 pub const SetCompressionPacket = struct {
-    threshold: CraftTypes.VarInt,
+    threshold: i32,
+
+    pub const Encoding = CraftTypes.Encoding(@This());
+    pub const ENCODING: Encoding = .{ .threshold = .varnum };
 };
 
 pub const LoginPluginRequestPacket = struct {
-    message_id: CraftTypes.VarInt,
-    channel: CraftTypes.String, // identifer
-    data: CraftTypes.RemainingBytes,
+    message_id: i32,
+    channel: []const u8, // identifer
+    data: []const u8,
 
-    pub fn deinit(self: @This()) void {
-        self.channel.deinit();
-        self.data.deinit();
-    }
+    pub const Encoding = CraftTypes.Encoding(@This());
+    pub const ENCODING: Encoding = .{
+        .message_id = .default,
+        .channel = .{},
+        .data = .{ .length_prefix = .disabled },
+    };
 };
 
 pub const LoginCookieRequestPacket = struct {
-    key: CraftTypes.String,
+    key: []const u8,
 
-    pub fn deinit(self: @This()) void {
-        self.key.deinit();
-    }
+    pub const Encoding = CraftTypes.Encoding(@This());
+    pub const ENCODING: Encoding = .{};
 };
 
 pub const LoginStartPacket = struct {
-    name: CraftTypes.String,
+    name: []const u8,
     uuid: CraftTypes.UUID,
 
-    pub fn deinit(self: @This()) void {
-        self.name.deinit();
-    }
+    pub const Encoding = CraftTypes.Encoding(@This());
+    pub const ENCODING: Encoding = .{};
 };
 
 pub const LoginEncryptionResponsePacket = struct {
-    sharedSecret: CraftTypes.String, // bytes
-    verifyToken: CraftTypes.String, // bytes
+    shared_secret: []const u8, // bytes
+    verify_token: []const u8, // bytes
 
-    pub fn deinit(self: @This()) void {
-        self.sharedSecret.deinit();
-        self.verifyToken.deinit();
-    }
+    pub const Encoding = CraftTypes.Encoding(@This());
+    pub const ENCODING: Encoding = .{};
 };
 
 pub const LoginPluginResponsePacket = struct {
-    message_id: CraftTypes.VarInt,
-    data: ?CraftTypes.RemainingBytes,
+    message_id: i32,
+    data: ?[]const u8,
 
-    pub fn deinit(self: @This()) void {
-        if (self.data) |d| {
-            d.deinit();
-        }
-    }
+    pub const Encoding = CraftTypes.Encoding(@This());
+    pub const ENCODING: Encoding = .{
+        .message_id = .varnum,
+        .data = .{ .length_prefix = .disabled },
+    };
 };
 
 pub const LoginCookieResponsePacket = struct {
-    key: CraftTypes.String,
-    payload: ?CraftTypes.String, // optional bytes
+    key: []const u8,
+    payload: ?[]const u8, // optional bytes
 
-    pub fn deinit(self: @This()) void {
-        self.key.deinit();
-        if (self.payload) |pld| {
-            pld.deinit();
-        }
-    }
+    pub const Encoding = CraftTypes.Encoding(@This());
+    pub const ENCODING: Encoding = .{};
 };
+
+test "encoding numeric tagged union" {
+    const PlayerTarget = struct {
+        player_name: []const u8,
+        player_id: CraftTypes.UUID,
+    };
+
+    const ScoreboardActionTag = enum(i32) { add, remove, clear };
+
+    const ScoreboardAction = union(ScoreboardActionTag) {
+        add: PlayerTarget,
+        remove: PlayerTarget,
+        clear,
+
+        const Encoding = CraftTypes.Encoding(@This());
+        pub const ENCODING: Encoding = .{ .tag = .varnum };
+    };
+
+    const ScoreboardPacket = struct {
+        actions: []const ScoreboardAction,
+    };
+
+    const sb_pkt: ScoreboardPacket = .{ .actions = &.{
+        .{ .remove = .{
+            .player_name = "joey",
+            .player_id = CraftTypes.UUID.random(std.crypto.random),
+        } },
+        .{ .add = .{
+            .player_name = "bill",
+            .player_id = CraftTypes.UUID.random(std.crypto.random),
+        } },
+        .{ .add = .{
+            .player_name = "albert",
+            .player_id = CraftTypes.UUID.random(std.crypto.random),
+        } },
+        .{ .remove = .{
+            .player_name = "the devil",
+            .player_id = CraftTypes.UUID.random(std.crypto.random),
+        } },
+    } };
+
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+
+    var buf = std.ArrayList(u8).init(allocator);
+
+    const sb_pkt_encoding: CraftTypes.Encoding(ScoreboardPacket) = .{};
+    _ = try CraftTypes.encode(sb_pkt, buf.writer(), .{});
+    std.debug.print("\nin: {any}\nencoding: {any}\nout:{any}\n", .{ sb_pkt, sb_pkt_encoding, buf.items });
+
+    var stream = std.io.fixedBufferStream(buf.items);
+    const sb_pkt_decoded = (try CraftTypes.decode(
+        ScoreboardPacket,
+        stream.reader(),
+        allocator,
+        sb_pkt_encoding,
+    )).unwrap(null);
+    std.debug.print("\ndecoded: {any}\n", .{sb_pkt_decoded});
+}
