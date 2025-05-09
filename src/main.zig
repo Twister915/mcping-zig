@@ -101,7 +101,7 @@ fn ping(allocator: std.mem.Allocator, target: Target) !PingResponse {
     });
 
     _ = try conn.writePacket(0x00, .{});
-    // we return the strings in this response packet, so we don't deinit the packet here (let the )
+    // we return this packet in PingResponse, so the caller to ping owns the memory allocated by decoding this packet
     const status_response_packet = try (try conn.readPacket()).decodeAs(allocator, CraftPacket.StatusResponsePacket);
 
     const ping_at_ms = std.time.milliTimestamp();
