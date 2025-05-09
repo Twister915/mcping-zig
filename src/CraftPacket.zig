@@ -16,6 +16,7 @@ pub const HandshakingPacket = struct {
     pub const ENCODING: Encoding = .{
         .version = .varnum,
         .next_state = .varnum,
+        .address = .{ .length = .{ .max = 0xFF } },
     };
 };
 
@@ -30,13 +31,16 @@ test "encode handshaking packet" {
     var buf = std.ArrayList(u8).init(std.testing.allocator);
     defer buf.deinit();
 
-    _ = try CraftTypes.encode(pkt, buf.writer(), .{});
+    _ = try CraftTypes.encode(pkt, buf.writer(), HandshakingPacket);
     std.debug.print("\nin: {any}\nencoding: {any}\nout:{any}\n", .{ pkt, HandshakingPacket.ENCODING, buf.items });
 }
 
 // state = status
 pub const StatusResponsePacket = struct {
     status: []const u8,
+
+    const Encoding = CraftTypes.Encoding(@This());
+    pub const ENCODING: Encoding = .{ .status = .{ .length = .{ .max = 0x7FFF } } };
 };
 
 pub const StatusPingPongPacket = struct {
@@ -53,6 +57,9 @@ pub const EncryptionRequestPacket = struct {
     public_key: []const u8, // bytes
     verify_token: []const u8, // bytes
     should_authenticate: bool,
+
+    const Encoding = CraftTypes.Encoding(@This());
+    pub const ENCODING: Encoding = .{ .server_id = .{ .length = .{ .max = 20 } } };
 };
 
 pub const LoginSuccessPacket = struct {
@@ -60,10 +67,20 @@ pub const LoginSuccessPacket = struct {
     username: []const u8,
     properties: []const Property,
 
+    const Encoding = CraftTypes.Encoding(@This());
+    pub const ENCODING: Encoding = .{ .username = .{ .length = .{ .max = 0x10 } } };
+
     pub const Property = struct {
         name: []const u8,
         value: []const u8,
         signature: ?[]const u8,
+
+        const PropertyEncoding = CraftTypes.Encoding(@This());
+        pub const ENCODING: PropertyEncoding = .{
+            .name = .{ .length = .{ .max = 0x40 } },
+            .value = .{ .length = .{ .max = 0x7FFF } },
+            .signature = .{ .length = .{ .max = 0x400 } },
+        };
     };
 };
 
@@ -107,9 +124,8 @@ pub const LoginPluginRequestPacket = struct {
 
     pub const Encoding = CraftTypes.Encoding(@This());
     pub const ENCODING: Encoding = .{
-        .message_id = .default,
-        .channel = .{},
-        .data = .{ .length_prefix = .disabled },
+        .channel = .{ .length = .{ .max = 0x7FFF } },
+        .data = .{ .length = .{ .prefix = .disabled, .max = 0x100000 } },
     };
 };
 
@@ -143,7 +159,7 @@ pub const LoginPluginResponsePacket = struct {
     pub const Encoding = CraftTypes.Encoding(@This());
     pub const ENCODING: Encoding = .{
         .message_id = .varnum,
-        .data = .{ .length_prefix = .disabled },
+        .data = .{ .length = .{ .prefix = .disabled, .max = 0x100000 } },
     };
 };
 

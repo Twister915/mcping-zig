@@ -152,14 +152,19 @@ fn StructEncoding(comptime Struct: type) type {
     return @Type(EncodingStruct);
 }
 
+pub const LengthEncoding = struct {
+    max: usize = MAX_PACKET_SIZE,
+    prefix: LengthPrefixMode = .{ .enabled = .{} },
+};
+
 pub const LengthPrefixMode = union(enum) {
     disabled,
     enabled: LengthPrefixEncoding,
 };
 
 pub const LengthPrefixEncoding = struct {
-    bits: usize,
-    encoding: IntEncoding = .default,
+    bits: usize = 32,
+    encoding: IntEncoding = .varnum,
 
     pub fn Counter(comptime encoding: @This()) type {
         return @Type(.{ .int = .{
@@ -169,10 +174,7 @@ pub const LengthPrefixEncoding = struct {
     }
 };
 
-pub const DEFAULT_LENGTH_PREFIX_ENCODING: LengthPrefixMode = .{ .enabled = .{
-    .bits = 32,
-    .encoding = .varnum,
-} };
+pub const DEFAULT_LENGTH_ENCODING: LengthEncoding = .{};
 
 fn PointerEncoding(comptime P: type) type {
     const Ptr = @typeInfo(P).pointer;
@@ -186,7 +188,7 @@ fn PointerEncoding(comptime P: type) type {
 
             const ItemsEncoding = Encoding(Ptr.child);
             return struct {
-                length_prefix: LengthPrefixMode = DEFAULT_LENGTH_PREFIX_ENCODING,
+                length: LengthEncoding = DEFAULT_LENGTH_ENCODING,
                 items: ItemsEncoding = @as(*const ItemsEncoding, @ptrCast(@alignCast(defaultEncoding(Ptr.child)))).*,
             };
         },
@@ -356,15 +358,19 @@ fn encodePointer(comptime Ptr: std.builtin.Type.Pointer, data: anytype, writer: 
             const slice = if (Ptr.size == .many) std.mem.span(data) else data;
 
             var bytes: usize = 0;
-            // length prefixing
-            const lp_mode: LengthPrefixMode = encoding.length_prefix;
-            switch (lp_mode) {
+            // dealing with length
+            const len_encoding: LengthEncoding = encoding.length;
+            switch (len_encoding.prefix) {
                 .enabled => |lp| {
                     const Counter = lp.Counter();
                     const counter: Counter = @as(Counter, @intCast(slice.len));
                     bytes += try encode(counter, writer, lp.encoding);
                 },
                 else => {},
+            }
+
+            if (slice.len > len_encoding.max) {
+                return error.PacketTooBig;
             }
 
             // []u8, []const u8, etc
@@ -522,8 +528,7 @@ fn decodeFloat(comptime Float: type, reader: anytype) !Decoded(Float) {
     // craft protocol defined to only work for "float" and "double" aka f32, f64
     comptime {
         switch (NUM_BITS) {
-            32 => {},
-            64 => {},
+            32, 64 => {},
             else => @compileError("craft protocol only supports f32 and f64, refusing to decode"),
         }
     }
@@ -555,12 +560,15 @@ fn decodePointer(comptime Data: type, reader: anytype, allocator: std.mem.Alloca
             var bytes: usize = 0;
             var dst: NonConstPointer(Data) = undefined;
 
-            const length_prefix_mode: LengthPrefixMode = encoding.length_prefix;
-            switch (length_prefix_mode) {
+            const length_encoding: LengthEncoding = encoding.length;
+            switch (length_encoding.prefix) {
                 .disabled => {
                     // read until reader runs dry
                     if (Payload == u8) {
-                        dst = try reader.readAllAlloc(allocator, MAX_PACKET_SIZE);
+                        dst = reader.readAllAlloc(allocator, length_encoding.max) catch |err| switch (err) {
+                            error.StreamTooLong => return error.PacketTooBig,
+                            else => return err,
+                        };
                         bytes = dst.len;
                     } else {
                         @compileError(@typeName(Data) ++ " cannot be decoded without length prefix (unsupported, but TODO)");
@@ -570,6 +578,9 @@ fn decodePointer(comptime Data: type, reader: anytype, allocator: std.mem.Alloca
                     // decode the counter from the wire
                     const Counter = lp.Counter();
                     const count: usize = @intCast((try decode(Counter, reader, allocator, lp.encoding)).unwrap(&bytes));
+                    if (count > length_encoding.max) {
+                        return error.PacketTooBig;
+                    }
 
                     // use allocator to allocate a slice
                     if (Ptr.size == .many) {
