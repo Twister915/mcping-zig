@@ -153,7 +153,7 @@ fn StructEncoding(comptime Struct: type) type {
 }
 
 pub const LengthEncoding = struct {
-    max: usize = MAX_PACKET_SIZE,
+    max: comptime_int = MAX_PACKET_SIZE,
     prefix: LengthPrefixMode = .{ .enabled = .{} },
 };
 
@@ -163,7 +163,7 @@ pub const LengthPrefixMode = union(enum) {
 };
 
 pub const LengthPrefixEncoding = struct {
-    bits: usize = 32,
+    bits: comptime_int = 32,
     encoding: IntEncoding = .varnum,
 
     pub fn Counter(comptime encoding: @This()) type {

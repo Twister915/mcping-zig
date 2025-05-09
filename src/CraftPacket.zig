@@ -131,9 +131,6 @@ pub const LoginPluginRequestPacket = struct {
 
 pub const LoginCookieRequestPacket = struct {
     key: []const u8,
-
-    pub const Encoding = CraftTypes.Encoding(@This());
-    pub const ENCODING: Encoding = .{};
 };
 
 pub const LoginStartPacket = struct {
@@ -141,15 +138,14 @@ pub const LoginStartPacket = struct {
     uuid: CraftTypes.UUID,
 
     pub const Encoding = CraftTypes.Encoding(@This());
-    pub const ENCODING: Encoding = .{};
+    pub const ENCODING: Encoding = .{
+        .name = .{ .length = .{ .max = 0x10 } },
+    };
 };
 
 pub const LoginEncryptionResponsePacket = struct {
     shared_secret: []const u8, // bytes
     verify_token: []const u8, // bytes
-
-    pub const Encoding = CraftTypes.Encoding(@This());
-    pub const ENCODING: Encoding = .{};
 };
 
 pub const LoginPluginResponsePacket = struct {
@@ -168,7 +164,10 @@ pub const LoginCookieResponsePacket = struct {
     payload: ?[]const u8, // optional bytes
 
     pub const Encoding = CraftTypes.Encoding(@This());
-    pub const ENCODING: Encoding = .{};
+    pub const ENCODING: Encoding = .{
+        .key = .{ .length = .{ .max = 0x7FFF } },
+        .payload = .{ .length = .{ .max = 0x1400 } },
+    };
 };
 
 test "encoding numeric tagged union" {
