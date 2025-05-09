@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const MAX_PACKET_SIZE: usize = 0x80000000;
+pub const MAX_PACKET_SIZE: usize = 0x1FFFFF;
 
 pub fn encode(data: anytype, writer: anytype) !usize {
     const Data = @TypeOf(data);
@@ -26,6 +26,7 @@ pub fn encode(data: anytype, writer: anytype) !usize {
         .array => |A| encodeArray(A, data, writer),
         .optional => encodeOptional(data, writer),
         .@"enum" => |E| encodeEnum(E, data, writer),
+        .@"union" => |U| encodeUnion(U, data, writer),
         else => @compileError(@typeName(Data) ++ " cannot be craft encoded"),
     };
 }
@@ -55,6 +56,7 @@ pub fn decode(comptime Data: type, reader: anytype, allocator: std.mem.Allocator
         .array => |A| decodeArray(A, Data, reader, allocator),
         .optional => |Opt| decodeOptional(Opt, Data, reader, allocator),
         .@"enum" => |E| decodeEnum(E, Data, reader, allocator),
+        .@"union" => |U| decodeUnion(U, Data, reader, allocator),
         else => @compileError(@typeName(Data) ++ " cannot be craft decoded"),
     };
 }
@@ -263,6 +265,28 @@ fn encodeEnum(comptime E: std.builtin.Type.Enum, data: anytype, writer: anytype)
     }
 }
 
+fn encodeUnion(comptime U: std.builtin.Type.Union, data: anytype, writer: anytype) !usize {
+    comptime {
+        if (U.tag_type) |UnionTag| {
+            const tag_enum_info = @typeInfo(UnionTag).@"enum";
+            if (!tag_enum_info.is_exhaustive) {
+                @compileError("union tag type " ++ @typeName(tag_enum_info.tag_type) ++ " is not exhaustive for union " ++ @typeName(@TypeOf(data)) ++ ". Cannot implement encode.");
+            }
+        } else {
+            @compileError("cannot encode union " ++ @typeName(@TypeOf(data)) ++ " because it is not a tagged union");
+        }
+    }
+
+    switch (data) {
+        inline else => |d, tag| {
+            var bytes: usize = 0;
+            bytes += try encode(tag, writer);
+            bytes += try encode(d, writer);
+            return bytes;
+        },
+    }
+}
+
 pub fn Decoded(comptime T: type) type {
     return struct {
         value: T,
@@ -456,6 +480,31 @@ fn decodeEnum(comptime E: std.builtin.Type.Enum, comptime Enum: type, reader: an
         const converted: Enum = try std.meta.intToEnum(Enum, dcd.value);
         return .{ .value = converted, .bytes_read = dcd.bytes_read };
     }
+}
+
+fn decodeUnion(comptime U: std.builtin.Type.Union, comptime Union: type, reader: anytype, allocator: std.mem.Allocator) !Decoded(Union) {
+    if (U.tag_type) |UnionTag| {
+        var bytes: usize = 0;
+        // decode the tag (an int, of some kind)
+        const tag_decoded: UnionTag = (try decode(UnionTag, reader, allocator)).unwrap(&bytes);
+
+        const tag_enum_info = @typeInfo(UnionTag).@"enum";
+        const TagInt = tag_enum_info.tag_type;
+        inline for (U.fields, tag_enum_info.fields) |union_field, tag_variant| {
+            if (@as(TagInt, @intCast(tag_variant.value)) == @intFromEnum(tag_decoded)) {
+                const PayloadType = union_field.type;
+                const payload_decoded: PayloadType = (try decode(PayloadType, reader, allocator)).unwrap(&bytes);
+                const out = @unionInit(Union, union_field.name, payload_decoded);
+                return .{
+                    .bytes_read = bytes,
+                    .value = out,
+                };
+            }
+        }
+
+        return error.UnknownEnumVariant;
+    }
+    @compileError("union " ++ @typeName(Union) ++ " must be tagged to be decoded");
 }
 
 pub fn EnumTable(comptime Enum: type, comptime Item: type) type {
@@ -1016,7 +1065,7 @@ pub fn RestOfPacketArray(comptime Payload: type) type {
 
         pub fn craftDecode(reader: anytype, allocator: std.mem.Allocator) !Decoded(Ctr) {
             if (Payload == u8) {
-                // we own this memory
+                // caller will end up owning this memory
                 const out: Ctr = .{
                     .items = .{
                         .owned = .{

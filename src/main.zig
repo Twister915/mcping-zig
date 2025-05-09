@@ -63,7 +63,7 @@ fn pingPrint(allocator: std.mem.Allocator, target: Target) !void {
 
     std.debug.print("{?d}ms {s}\n", .{
         response.latency_ms,
-        response.status.constSlice(),
+        response.status_response_packet.status.constSlice(),
     });
 }
 
@@ -79,13 +79,13 @@ const Profile = struct {
 };
 
 const PingResponse = struct {
-    status: CraftTypes.CowSlice(u8),
+    status_response_packet: CraftPacket.StatusResponsePacket,
     latency_ms: ?i64 = null,
 
     const Self = @This();
 
     fn deinit(self: Self) void {
-        self.status.deinit();
+        self.status_response_packet.deinit();
     }
 };
 
@@ -101,10 +101,8 @@ fn ping(allocator: std.mem.Allocator, target: Target) !PingResponse {
     });
 
     _ = try conn.writePacket(0x00, .{});
+    // we return the strings in this response packet, so we don't deinit the packet here (let the )
     const status_response_packet = try (try conn.readPacket()).decodeAs(allocator, CraftPacket.StatusResponsePacket);
-    defer status_response_packet.deinit();
-
-    const status = status_response_packet.status.items;
 
     const ping_at_ms = std.time.milliTimestamp();
     _ = try conn.writePacket(0x01, CraftPacket.StatusPingPongPacket{
@@ -112,7 +110,7 @@ fn ping(allocator: std.mem.Allocator, target: Target) !PingResponse {
     });
 
     const pong_ts = (try (try conn.readPacket()).decodeAs(allocator, CraftPacket.StatusPingPongPacket)).timestamp;
-    var out: PingResponse = .{ .status = status };
+    var out: PingResponse = .{ .status_response_packet = status_response_packet };
     if (pong_ts == ping_at_ms) {
         const pong_rcv_at = std.time.milliTimestamp();
         out.latency_ms = pong_rcv_at - ping_at_ms;
