@@ -37,7 +37,7 @@ test "encode handshaking packet" {
         .version = @enumFromInt(770),
         .address = .init("localhost"),
         .port = 25565,
-        .nextState = .status,
+        .next_state = .status,
     };
     std.debug.print("version = {d}\n", .{packet.version});
     var buf = std.ArrayList(u8).init(std.testing.allocator);
@@ -50,7 +50,7 @@ test "encode handshaking packet" {
     _ = try CraftTypes.encode(packet.version, expected.writer());
     _ = try CraftTypes.encode(packet.address, expected.writer());
     _ = try CraftTypes.encode(packet.port, expected.writer());
-    _ = try CraftTypes.encode(packet.nextState, expected.writer());
+    _ = try CraftTypes.encode(packet.next_state, expected.writer());
 
     try std.testing.expectEqualSlices(u8, expected.items, buf.items);
 }

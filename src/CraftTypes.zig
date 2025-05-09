@@ -1036,7 +1036,7 @@ test "encode uuid" {
     defer buf.deinit();
 
     const id0 = UUID.random(std.crypto.random);
-    const bytes = try id0.encode(buf.writer());
+    const bytes = try encode(id0, buf.writer());
     try std.testing.expectEqual(UUID.NUM_BYTES, bytes);
     try std.testing.expectEqualStrings(&id0.raw, buf.items);
 }
