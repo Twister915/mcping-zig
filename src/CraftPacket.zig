@@ -1,5 +1,6 @@
 const std = @import("std");
 const CraftTypes = @import("CraftTypes.zig");
+const UUID = @import("UUID.zig");
 
 // state = handshake
 pub const HandshakingPacket = struct {
@@ -63,7 +64,7 @@ pub const EncryptionRequestPacket = struct {
 };
 
 pub const LoginSuccessPacket = struct {
-    uuid: CraftTypes.UUID,
+    uuid: UUID,
     username: []const u8,
     properties: []const Property,
 
@@ -86,7 +87,7 @@ pub const LoginSuccessPacket = struct {
 
 test "encode login success packet" {
     const pkt: LoginSuccessPacket = .{
-        .uuid = CraftTypes.UUID.random(std.crypto.random),
+        .uuid = UUID.random(std.crypto.random),
         .username = "Notch",
         .properties = &.{
             .{
@@ -135,7 +136,7 @@ pub const LoginCookieRequestPacket = struct {
 
 pub const LoginStartPacket = struct {
     name: []const u8,
-    uuid: CraftTypes.UUID,
+    uuid: UUID,
 
     pub const Encoding = CraftTypes.Encoding(@This());
     pub const ENCODING: Encoding = .{
@@ -173,7 +174,12 @@ pub const LoginCookieResponsePacket = struct {
 test "encoding numeric tagged union" {
     const PlayerTarget = struct {
         player_name: []const u8,
-        player_id: CraftTypes.UUID,
+        player_id: UUID,
+
+        pub const Encoding = CraftTypes.Encoding(@This());
+        pub const ENCODING: Encoding = .{
+            .player_name = .{ .length = .{ .max = 12 } },
+        };
     };
 
     const ScoreboardActionTag = enum(i32) { add, remove, clear };
@@ -194,19 +200,19 @@ test "encoding numeric tagged union" {
     const sb_pkt: ScoreboardPacket = .{ .actions = &.{
         .{ .remove = .{
             .player_name = "joey",
-            .player_id = CraftTypes.UUID.random(std.crypto.random),
+            .player_id = UUID.random(std.crypto.random),
         } },
         .{ .add = .{
             .player_name = "bill",
-            .player_id = CraftTypes.UUID.random(std.crypto.random),
+            .player_id = UUID.random(std.crypto.random),
         } },
         .{ .add = .{
             .player_name = "albert",
-            .player_id = CraftTypes.UUID.random(std.crypto.random),
+            .player_id = UUID.random(std.crypto.random),
         } },
         .{ .remove = .{
             .player_name = "the devil",
-            .player_id = CraftTypes.UUID.random(std.crypto.random),
+            .player_id = UUID.random(std.crypto.random),
         } },
     } };
 

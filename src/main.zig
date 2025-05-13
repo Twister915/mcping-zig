@@ -2,6 +2,7 @@ const std = @import("std");
 const CraftConn = @import("CraftConn.zig");
 const CraftPacket = @import("CraftPacket.zig");
 const CraftTypes = @import("CraftTypes.zig");
+const UUID = @import("UUID.zig");
 
 pub const std_options: std.Options = .{
     .log_level = .debug,
@@ -75,7 +76,7 @@ const Target = struct {
 
 const Profile = struct {
     username: []const u8,
-    uuid: CraftTypes.UUID,
+    uuid: UUID,
 };
 
 const PingResponse = struct {
