@@ -268,8 +268,8 @@ fn encodeInt(
 
 // "var num" such as VarInt, VarLong
 fn encodeVarnum(data: anytype, writer: anytype) !usize {
-    const VarNumType = comptime @TypeOf(data);
-    const NUM_BITS = comptime @bitSizeOf(VarNumType);
+    const VarNumType = @TypeOf(data);
+    const NUM_BITS = @bitSizeOf(VarNumType);
     const MAX_BYTES = comptime std.math.divCeil(usize, NUM_BITS, 7) catch unreachable;
 
     var to_encode = data;
@@ -473,11 +473,11 @@ fn WireTagFor(comptime Tagged: type) type {
 fn getWireTag(data: anytype) WireTagFor(@TypeOf(data)) {
     const T = @TypeOf(data);
     switch (@typeInfo(T)) {
-        .@"enum" => |E| {
+        .@"enum" => {
             if (std.meta.hasFn(T, CRAFT_TAG_FN_NAME)) {
-                return @call(.auto, @field(data, CRAFT_TAG_FN_NAME), .{data});
+                return @field(data, CRAFT_TAG_FN_NAME)(data);
             } else {
-                return @as(E.tag_type, @intFromEnum(data));
+                return @intFromEnum(data);
             }
         },
         else => @compileError("no associated wire tag for type " ++ @typeName(T)),
@@ -577,7 +577,7 @@ fn decodeFloat(comptime Float: type, reader: anytype) !Decoded(Float) {
 
     // compute an equiv unsigned integer type so we can do a bit cast
     // for example, f32 becomes AsInt=u32, f64 becomes AsInt=u64
-    const AsInt: type = comptime @Type(.{ .int = .{
+    const AsInt: type = @Type(.{ .int = .{
         .bits = NUM_BITS,
         .signedness = .unsigned,
     } });
@@ -692,7 +692,7 @@ fn decodeStruct(
     allocator: std.mem.Allocator,
     comptime encoding: Encoding(Data),
 ) !Decoded(Data) {
-    const S = comptime @typeInfo(Data).@"struct";
+    const S = @typeInfo(Data).@"struct";
     var decoded_value: Data = undefined;
     var bytes: usize = 0;
 
@@ -719,7 +719,7 @@ fn decodeOptional(
     allocator: std.mem.Allocator,
     comptime encoding: Encoding(Data),
 ) !Decoded(Data) {
-    const Opt = comptime @typeInfo(Data).optional;
+    const Opt = @typeInfo(Data).optional;
     var out: Decoded(Data) = undefined;
     out.bytes_read = 0;
 
