@@ -2,14 +2,15 @@ const std = @import("std");
 const CraftConn = @import("CraftConn.zig");
 const CraftPacket = @import("CraftPacket.zig");
 const CraftTypes = @import("CraftTypes.zig");
+const UUID = @import("UUID.zig");
 
 pub const std_options: std.Options = .{
     .log_level = .debug,
 };
 
 pub fn main() !void {
-    // 16k stack buffer for heap, should be fine since we only have to allocate the status string
-    var buffer: [0x4000]u8 = undefined;
+    // 64k stack buffer for heap, should be fine since we only have to allocate the status string
+    var buffer: [0x10000]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buffer);
     const allocator = fba.allocator();
 
@@ -43,12 +44,12 @@ pub fn main() !void {
 
 fn targetFromArg(raw: []const u8) !Target {
     var target: Target = .{ .host = raw };
-    if (std.mem.indexOfScalar(u8, raw, ':')) |rawPortIdx| {
-        const portStartIdx = rawPortIdx + 1;
-        if (raw.len > portStartIdx) {
-            const rawPort = raw[rawPortIdx..];
-            if (std.fmt.parseInt(u16, rawPort, 10) catch null) |parsed| {
-                const host = raw[0..rawPortIdx];
+    if (std.mem.indexOfScalar(u8, raw, ':')) |raw_port_idx| {
+        const port_start_idx = raw_port_idx + 1;
+        if (raw.len > port_start_idx) {
+            const raw_port = raw[raw_port_idx..];
+            if (std.fmt.parseInt(u16, raw_port, 10) catch null) |parsed| {
+                const host = raw[0..raw_port_idx];
                 target.host = host;
                 target.port = parsed;
             }
@@ -62,30 +63,30 @@ fn pingPrint(allocator: std.mem.Allocator, target: Target) !void {
     defer response.deinit();
 
     std.debug.print("{?d}ms {s}\n", .{
-        response.latencyMs,
-        response.status.constSlice(),
+        response.latency_ms,
+        response.status_response_packet.packet.status,
     });
 }
 
 const Target = struct {
-    protocolVersion: i32 = 769,
+    protocol_version: i32 = 769,
     host: []const u8,
     port: u16 = 25565,
 };
 
 const Profile = struct {
     username: []const u8,
-    uuid: CraftTypes.UUID,
+    uuid: UUID,
 };
 
 const PingResponse = struct {
-    status: CraftTypes.PossiblyOwnedSlice(u8),
-    latencyMs: ?i64 = null,
+    status_response_packet: CraftConn.DecodedPkt(CraftPacket.StatusResponsePacket),
+    latency_ms: ?i64 = null,
 
     const Self = @This();
 
     fn deinit(self: Self) void {
-        self.status.deinit();
+        self.status_response_packet.deinit();
     }
 };
 
@@ -93,26 +94,30 @@ fn ping(allocator: std.mem.Allocator, target: Target) !PingResponse {
     var conn = try CraftConn.connect(allocator, target.host, target.port);
     defer conn.deinit();
 
-    _ = try conn.writePacket(.init(0x00), CraftPacket.HandshakingPacket{
-        .version = .init(target.protocolVersion),
-        .address = .init(target.host),
-        .port = .init(target.port),
-        .nextState = .init(.status),
+    _ = try conn.writePacket(0x00, CraftPacket.HandshakingPacket{
+        .version = target.protocol_version,
+        .address = target.host,
+        .port = target.port,
+        .next_state = .status,
     });
 
-    _ = try conn.writePacket(.init(0x00), CraftPacket.EmptyPacket{});
-    const status = (try (try conn.readPacket()).decodeAs(allocator, CraftPacket.StatusResponsePacket)).status.items;
+    _ = try conn.writePacket(0x00, {});
+    // we return this packet in PingResponse, so the caller to ping owns the memory allocated by decoding this packet
+    const status_response_packet = try (try conn.readPacket()).decodeAs(CraftPacket.StatusResponsePacket, allocator);
 
-    const pingAtMs = std.time.milliTimestamp();
-    _ = try conn.writePacket(.init(0x01), CraftPacket.StatusPingPongPacket{
-        .timestamp = .init(pingAtMs),
-    });
+    const ping_at_ms = std.time.milliTimestamp();
+    _ = try conn.writePacket(0x01, CraftPacket.StatusPingPongPacket{ .timestamp = ping_at_ms });
 
-    const pongTs = (try (try conn.readPacket()).decodeAs(allocator, CraftPacket.StatusPingPongPacket)).timestamp.value;
-    var out: PingResponse = .{ .status = status };
-    if (pongTs == pingAtMs) {
-        const pongRcvAt = std.time.milliTimestamp();
-        out.latencyMs = pongRcvAt - pingAtMs;
+    const pong_ts = do_pong: {
+        const pong_packet = try (try conn.readPacket()).decodeAs(CraftPacket.StatusPingPongPacket, allocator);
+        defer pong_packet.deinit();
+        break :do_pong pong_packet.packet.timestamp;
+    };
+
+    var out: PingResponse = .{ .status_response_packet = status_response_packet };
+    if (pong_ts == ping_at_ms) {
+        const pong_rcv_at = std.time.milliTimestamp();
+        out.latency_ms = pong_rcv_at - ping_at_ms;
     }
     return out;
 }
@@ -121,54 +126,54 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile) 
     var conn = try CraftConn.connect(allocator, target.host, target.port);
     defer conn.deinit();
     // state = handshaking
-    _ = try conn.writePacket(.init(0x00), CraftPacket.HandshakingPacket{
-        .address = .init(target.host),
-        .port = .init(target.port),
-        .version = .init(target.protocolVersion),
-        .nextState = .init(.login),
+    _ = try conn.writePacket(0x00, CraftPacket.HandshakingPacket{
+        .address = target.host,
+        .port = target.port,
+        .version = target.protocol_version,
+        .next_state = .login,
     });
 
     // state = login
 
     // 0x00 LoginStart client ----> server
-    _ = try conn.writePacket(.init(0x00), CraftPacket.LoginStartPacket{
-        .name = .init(profile.username),
+    _ = try conn.writePacket(0x00, CraftPacket.LoginStartPacket{
+        .name = profile.username,
         .uuid = profile.uuid,
     });
 
     login_state: while (true) {
-        const loginPacket = try conn.readPacket();
-        switch (loginPacket.id.value) {
+        const login_packet = try conn.readPacket();
+        switch (login_packet.id) {
             0x00 => {
-                const disconnectPacket = try loginPacket.decodeAs(allocator, CraftPacket.DisconnectPacket);
-                defer disconnectPacket.deinit();
+                const disconnect_packet = try login_packet.decodeAs(CraftPacket.DisconnectPacket, allocator);
+                defer disconnect_packet.deinit();
 
-                std.debug.print("disconnected from {s} ---> {s}\n", .{ target.host, disconnectPacket.reason.constSlice() });
+                std.debug.print("disconnected from {s} ---> {s}\n", .{ target.host, disconnect_packet.packet.reason });
                 return error.Disconnected;
             },
             0x01 => {
                 // encryption request
-                const encryptionRequestPacket = try loginPacket.decodeAs(allocator, CraftPacket.EncryptionRequestPacket);
-                defer encryptionRequestPacket.deinit();
+                const encryption_request_packet = try login_packet.decodeAs(CraftPacket.EncryptionRequestPacket, allocator);
+                defer encryption_request_packet.deinit();
 
-                std.debug.print("encryption requested ({}), not supported!\n", .{encryptionRequestPacket});
+                std.debug.print("encryption requested ({}), not supported!\n", .{encryption_request_packet.packet});
                 return error.EncryptionRequested;
             },
             0x02 => {
                 // login success
-                const loginSuccessPacket = try loginPacket.decodeAs(allocator, CraftPacket.LoginSuccessPacket);
-                defer loginSuccessPacket.deinit();
+                const login_success_packet = try login_packet.decodeAs(CraftPacket.LoginSuccessPacket, allocator);
+                defer login_success_packet.deinit();
 
                 // send login acknowledged
-                _ = try conn.writePacket(.init(0x03), CraftPacket.EmptyPacket{});
+                _ = try conn.writePacket(0x03, {});
                 break :login_state;
             },
             0x03 => {
                 // set compression
-                const setCompressionPacket = try loginPacket.decodeAs(allocator, CraftPacket.SetCompressionPacket);
-                defer setCompressionPacket.deinit();
+                const set_compression_packet = try login_packet.decodeAs(CraftPacket.SetCompressionPacket, allocator);
+                defer set_compression_packet.deinit();
 
-                try conn.setCompressionThreshold(@intCast(setCompressionPacket.threshold.value));
+                try conn.setCompressionThreshold(@intCast(set_compression_packet.packet.threshold));
             },
             0x04 => {
                 // login plugin message
@@ -181,29 +186,29 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile) 
                 //
                 // so that's what I'm going to do... send empty LoginPluginResponsePacket
 
-                const pluginRequestPacket = try loginPacket.decodeAs(allocator, CraftPacket.LoginPluginRequestPacket);
-                defer pluginRequestPacket.deinit();
+                const ping_request_packet = try login_packet.decodeAs(CraftPacket.LoginPluginRequestPacket, allocator);
+                defer ping_request_packet.deinit();
 
                 // login plugin response = 0x02
-                _ = try conn.writePacket(.init(0x02), CraftPacket.LoginPluginResponsePacket{
-                    .messageId = pluginRequestPacket.messageId,
-                    .data = .none,
+                _ = try conn.writePacket(0x02, CraftPacket.LoginPluginResponsePacket{
+                    .message_id = ping_request_packet.packet.message_id,
+                    .data = null,
                 });
             },
             0x05 => {
                 // cookie request
                 // we don't have cookie storage yet, so let's just send back an empty cookie packet
 
-                const cookieRequestPacket = try loginPacket.decodeAs(allocator, CraftPacket.LoginCookieRequestPacket);
-                defer cookieRequestPacket.deinit();
+                const cookie_request_packet = try login_packet.decodeAs(CraftPacket.LoginCookieRequestPacket, allocator);
+                defer cookie_request_packet.deinit();
 
-                _ = try conn.writePacket(.init(0x04), CraftPacket.LoginCookieResponsePacket{
-                    .key = cookieRequestPacket.key.borrowed(), // borrow so we don't deinit twice
-                    .payload = .none,
+                _ = try conn.writePacket(0x04, CraftPacket.LoginCookieResponsePacket{
+                    .key = cookie_request_packet.packet.key, // borrow so we don't deinit twice
+                    .payload = null,
                 });
             },
-            else => |otherId| {
-                std.debug.print("bad packet id in login state 0x{x}\n", .{otherId});
+            else => |other_id| {
+                std.debug.print("bad packet id in login state 0x{x}\n", .{other_id});
                 return error.BadPacketId;
             },
         }
