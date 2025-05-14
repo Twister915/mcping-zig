@@ -74,18 +74,44 @@ pub fn decode(
     };
 }
 
+pub fn length(data: anytype, comptime encoding: Encoding(@TypeOf(data))) !usize {
+    const Data = @TypeOf(data);
+    switch (@typeInfo(Data)) {
+        .@"struct", .@"enum", .@"union" => {
+            if (@hasDecl(Data, "CRAFT_LENGTH")) {
+                return Data.CRAFT_LENGTH;
+            }
+        },
+        else => {},
+    }
+
+    if (std.meta.hasFn(Data, "craftLength")) {
+        return Data.craftLength(data, encoding);
+    }
+
+    if (Data == u8) {
+        return 1;
+    }
+
+    if (@sizeOf(Data) == 0) {
+        return 0;
+    }
+
+    return switch (@typeInfo(Data)) {
+        .int => lengthInt(data, encoding),
+        .bool, .float => @sizeOf(Data),
+        .pointer => lengthPointer(data, encoding),
+        .@"struct" => lengthStruct(data, encoding),
+        .array => lengthArray(data, encoding),
+        .optional => lengthOptional(data, encoding),
+        .@"enum" => lengthEnum(data, encoding),
+        .@"union" => lengthUnion(data, encoding),
+        else => @compileError(@typeName(Data) ++ " is not supported by craft encoding / decoding"),
+    };
+}
+
 pub const VAR_INT_BYTES: usize = 5;
 pub const VAR_LONG_BYTES: usize = 10;
-
-pub fn varNumLength(num: anytype) usize {
-    const T = @TypeOf(num);
-    switch (@typeInfo(T)) {
-        .int => |I| {
-            return std.math.divCeil(usize, @intCast(I.bits - @clz(num)), 7) catch unreachable;
-        },
-        else => @compileError(@typeName(T) ++ " is not an integer type"),
-    }
-}
 
 pub const IntEncoding = enum {
     default,
@@ -786,4 +812,99 @@ fn decodeUnion(
     }
 
     return error.InvalidEnumTag;
+}
+
+fn lengthInt(data: anytype, comptime encoding: IntEncoding) !usize {
+    return switch (encoding) {
+        .default => @sizeOf(@TypeOf(data)),
+        .varnum => @max(1, try std.math.divCeil(
+            usize,
+            @bitSizeOf(@TypeOf(data)) - @clz(data),
+            7,
+        )),
+    };
+}
+
+fn lengthPointer(data: anytype, comptime encoding: Encoding(@TypeOf(data))) !usize {
+    const Data = @TypeOf(data);
+    const ptr_info = @typeInfo(Data).pointer;
+    var bytes: usize = 0;
+    switch (ptr_info.size) {
+        .one => {
+            bytes = try length(data.*, encoding);
+        },
+        .many, .slice => {
+            // [*]T, [*:senti]T, [:senti]T, []T
+            if (ptr_info.size == .many and ptr_info.sentinel() == null) {
+                @compileError("unsized non-sentinel slices are not supported");
+            }
+
+            // [*:senti]T, [:senti]T, []T
+            // .many     , .slice   , .slice
+            const slice = if (ptr_info.size == .many) std.mem.span(data) else data;
+            // slice is always []T now
+            const len_encoding: LengthEncoding = encoding.length;
+            const count: usize = slice.len;
+            switch (len_encoding.prefix) {
+                .enabled => |lp| {
+                    const Counter: type = lp.Counter();
+                    const c: Counter = @intCast(count);
+                    bytes += try length(c, lp.encoding);
+                },
+                .disabled => {},
+            }
+
+            if (ptr_info.child == u8) {
+                bytes += slice.len;
+            } else {
+                for (slice) |item| {
+                    bytes += try length(item, encoding.items);
+                }
+            }
+        },
+        else => @compileError(@typeName(Data) ++ " is not supported by Craft encode / decode"),
+    }
+
+    return bytes;
+}
+
+fn lengthStruct(data: anytype, comptime encoding: Encoding(@TypeOf(data))) !usize {
+    const Data = @TypeOf(data);
+    const struct_info = @typeInfo(Data).@"struct";
+
+    var l: usize = 0;
+    inline for (struct_info.fields) |field| {
+        const field_data = @field(data, field.name);
+        const field_encoding = @field(encoding, field.name);
+        l += try length(field_data, field_encoding);
+    }
+
+    return l;
+}
+
+fn lengthArray(data: anytype, comptime _: Encoding(@TypeOf(data))) usize {
+    @compileError("array is todo");
+}
+
+fn lengthOptional(data: anytype, comptime encoding: Encoding(@TypeOf(data))) !usize {
+    if (data == null) {
+        return 1;
+    } else {
+        return 1 + (try length(data.?, encoding));
+    }
+}
+
+fn lengthEnum(data: anytype, comptime encoding: Encoding(@TypeOf(data))) !usize {
+    return length(getWireTag(data), encoding);
+}
+
+fn lengthUnion(data: anytype, comptime encoding: Encoding(@TypeOf(data))) !usize {
+    switch (data) {
+        inline else => |body, tag| {
+            const tag_bytes = try length(tag, encoding.tag);
+            const field_encoding = @field(encoding.fields, @tagName(tag));
+            const field_bytes = try length(body, field_encoding);
+            return tag_bytes + field_bytes;
+        },
+    }
 }

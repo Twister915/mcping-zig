@@ -108,7 +108,16 @@ test "encode login success packet" {
 
     const login_success_encoding: CraftTypes.Encoding(LoginSuccessPacket) = .{};
     _ = try CraftTypes.encode(pkt, buf.writer(), login_success_encoding);
-    std.debug.print("\nin: {any}\nencoding: {any}\nout:{any}\n", .{ pkt, login_success_encoding, buf.items });
+    std.debug.print(
+        "\nin: {any}\nencoding: {any}\nout:{any}\nlength(pkt): pred={d}, act={d}\n",
+        .{
+            pkt,
+            login_success_encoding,
+            buf.items,
+            try CraftTypes.length(pkt, login_success_encoding),
+            buf.items.len,
+        },
+    );
 }
 
 pub const SetCompressionPacket = struct {
@@ -172,6 +181,10 @@ pub const LoginCookieResponsePacket = struct {
 };
 
 test "encoding numeric tagged union" {
+    comptime {
+        @setEvalBranchQuota(10000);
+    }
+
     const PlayerTarget = struct {
         player_name: []const u8,
         player_id: UUID,

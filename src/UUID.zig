@@ -3,10 +3,10 @@ const CraftTypes = @import("CraftTypes.zig");
 
 const UUID = @This();
 
-pub const NUM_BYTES: usize = 16;
+pub const CRAFT_LENGTH: usize = 16;
 pub const CraftEncoding = void;
 
-raw: [NUM_BYTES]u8,
+raw: [CRAFT_LENGTH]u8,
 
 pub fn fromStr(repr: []const u8) !UUID {
     return .{ .raw = try Parser.parse(repr) };
@@ -30,13 +30,13 @@ pub fn format(uuid: *const UUID, comptime fmt: []const u8, _: std.fmt.FormatOpti
 
 pub fn craftEncode(uuid: UUID, writer: anytype, _: CraftEncoding) !usize {
     try writer.writeAll(&uuid.raw);
-    return NUM_BYTES;
+    return CRAFT_LENGTH;
 }
 
 pub fn craftDecode(reader: anytype, _: std.mem.Allocator, _: CraftEncoding) !CraftTypes.Decoded(UUID) {
     var out: UUID = undefined;
     try reader.readNoEof(&out.raw);
-    return .{ .bytes_read = NUM_BYTES, .value = out };
+    return .{ .bytes_read = CRAFT_LENGTH, .value = out };
 }
 
 fn Emitter(Writer: type) type {
@@ -104,7 +104,7 @@ const Parser = struct {
 
     fn parse(input: []const u8) ![16]u8 {
         var parser: Parser = .{ .input = input };
-        var out: [NUM_BYTES]u8 = undefined;
+        var out: [CRAFT_LENGTH]u8 = undefined;
         try parser.consumeGroup(out[0..4]);
         const has_hyphens = try parser.consumeHyphen(true);
         try parser.consumeGroup(out[4..6]);
