@@ -29,9 +29,9 @@ pub fn encode(
         .int => encodeInt(data, writer, encoding),
         .bool => encode(@as(u8, if (data) 1 else 0), writer, {}),
         .float => encodeFloat(data, writer),
-        .pointer => |Ptr| encodePointer(Ptr, data, writer, encoding),
-        .@"struct" => |S| encodeStruct(S, data, writer, encoding),
-        .array => |A| encodeArray(A, data, writer, encoding),
+        .pointer => encodePointer(data, writer, encoding),
+        .@"struct" => encodeStruct(data, writer, encoding),
+        .array => encodeArray(data, writer, encoding),
         .optional => encodeOptional(data, writer, encoding),
         .@"enum" => encodeEnum(data, writer, encoding),
         .@"union" => encodeUnion(data, writer, encoding),
@@ -66,7 +66,7 @@ pub fn decode(
         .float => decodeFloat(Data, reader),
         .pointer => decodePointer(Data, reader, allocator, encoding),
         .@"struct" => decodeStruct(Data, reader, allocator, encoding),
-        .array => |A| decodeArray(A, Data, reader, allocator, encoding),
+        .array => decodeArray(Data, reader, allocator, encoding),
         .optional => decodeOptional(Data, reader, allocator, encoding),
         .@"enum" => decodeEnum(Data, reader, allocator, encoding),
         .@"union" => decodeUnion(Data, reader, allocator, encoding),
@@ -131,11 +131,12 @@ pub fn Encoding(comptime Payload: type) type {
         .@"union" => UnionEncoding(Payload),
         .@"enum" => EnumEncoding(Payload),
         .optional => |O| Encoding(O.child),
+        .array => ArrayEncoding(Payload),
         else => @compileError(@typeName(Payload) ++ " cannot have encoding specified"),
     };
 }
 
-fn defaultEncoding(comptime Payload: type) Encoding(Payload) {
+pub fn defaultEncoding(comptime Payload: type) Encoding(Payload) {
     const Enc = Encoding(Payload);
     if (Enc == void) {
         return {};
@@ -154,7 +155,7 @@ fn defaultEncoding(comptime Payload: type) Encoding(Payload) {
     return switch (type_info) {
         .int => IntEncoding.default,
         .@"enum" => defaultEncoding(WireTagFor(Payload)),
-        .@"struct", .@"union", .pointer, .optional => .{},
+        .@"struct", .@"union", .pointer, .optional, .array => .{},
         else => @compileError("no default encoding computable for " ++ @typeName(Payload)),
     };
 }
@@ -233,6 +234,16 @@ fn PointerEncoding(comptime P: type) type {
     }
 }
 
+fn ArrayEncoding(comptime Array: type) type {
+    const array_info = @typeInfo(Array).array;
+    const Payload = array_info.child;
+    const ItemsEncoding = Encoding(Payload);
+    return struct {
+        length: LengthPrefixMode = .disabled,
+        items: ItemsEncoding = defaultEncoding(Payload),
+    };
+}
+
 fn UnionEncoding(comptime U: type) type {
     const Tag = WireTagFor(U);
     const TagEncoding = Encoding(Tag);
@@ -296,30 +307,39 @@ fn encodeInt(
 fn encodeVarnum(data: anytype, writer: anytype) !usize {
     const VarNumType = @TypeOf(data);
     const NUM_BITS = @bitSizeOf(VarNumType);
-    const MAX_BYTES = comptime std.math.divCeil(usize, NUM_BITS, 7) catch unreachable;
+    const MAX_BYTES = std.math.divCeil(usize, NUM_BITS, 7) catch unreachable;
 
-    var to_encode = data;
+    var to_encode: UnsignedIntEquiv(VarNumType) = @intCast(data);
     var bytes: usize = 0;
-    while (true) {
-        var b: u8 = @intCast(to_encode & 0x7F);
+    var buf: [MAX_BYTES]u8 = undefined;
+    for (&buf) |*b| {
+        bytes += 1;
+        b.* = @as(u8, @truncate(to_encode)) & 0x7F;
         to_encode >>= 7;
         const has_more = to_encode != 0;
         if (has_more) {
-            b |= 0x80;
-        }
-        bytes += try encode(b, writer, {});
-        if (!has_more) {
+            b.* |= 0x80;
+        } else {
+            try writer.writeAll(buf[0..bytes]);
             return bytes;
-        } else if (bytes >= MAX_BYTES) {
-            return error.VarNumTooLarge;
         }
     }
+
+    return error.VarNumTooLarge;
+}
+
+fn UnsignedIntEquiv(comptime IntType: type) type {
+    const int_info = @typeInfo(IntType).int;
+    return switch (int_info.signedness) {
+        .unsigned => IntType,
+        .signed => @Type(.{ .int = .{ .bits = int_info.bits, .signedness = .unsigned } }),
+    };
 }
 
 fn encodeFloat(data: anytype, writer: anytype) !usize {
     // inspect the float passed to us... determine it's type
-    const Float = comptime @TypeOf(data);
-    const NUM_BITS = comptime @bitSizeOf(Float);
+    const Float = @TypeOf(data);
+    const NUM_BITS = @bitSizeOf(Float);
 
     // craft protocol defined to only work for "float" and "double" aka f32, f64
     comptime {
@@ -332,7 +352,7 @@ fn encodeFloat(data: anytype, writer: anytype) !usize {
 
     // compute an equiv unsigned integer type so we can do a bit cast
     // for example, f32 becomes AsInt=u32, f64 becomes AsInt=u64
-    const AsInt: type = comptime @Type(.{ .int = .{
+    const AsInt: type = @Type(.{ .int = .{
         .bits = NUM_BITS,
         .signedness = .unsigned,
     } });
@@ -355,13 +375,14 @@ fn encodeOptional(
 
 // for a struct, let's just encode each field in the order it's declared
 fn encodeStruct(
-    comptime S: std.builtin.Type.Struct,
     data: anytype,
     writer: anytype,
     comptime encoding: Encoding(@TypeOf(data)),
 ) !usize {
+    const Struct = @TypeOf(data);
+    const struct_info = @typeInfo(Struct).@"struct";
     var bytes: usize = 0;
-    inline for (S.fields) |struct_field| {
+    inline for (struct_info.fields) |struct_field| {
         const field_data = @field(data, struct_field.name);
         const field_encoding = @field(encoding, struct_field.name);
         bytes += try encode(field_data, writer, field_encoding);
@@ -370,19 +391,19 @@ fn encodeStruct(
 }
 
 fn encodePointer(
-    comptime Ptr: std.builtin.Type.Pointer,
     data: anytype,
     writer: anytype,
     comptime encoding: Encoding(@TypeOf(data)),
 ) !usize {
-    const P = comptime @TypeOf(data);
+    const P = @TypeOf(data);
+    const ptr_info = @typeInfo(P).pointer;
 
-    switch (Ptr.size) {
+    switch (ptr_info.size) {
         .one => {
-            switch (@typeInfo(Ptr.child)) {
+            switch (@typeInfo(ptr_info.child)) {
                 .array => {
                     // *[N]T, can become []const T
-                    const Elem: type = std.meta.Elem(Ptr.child);
+                    const Elem: type = std.meta.Elem(ptr_info.child);
                     const ConstSlice: type = []const Elem;
                     return encode(@as(ConstSlice, data), writer, encoding);
                 },
@@ -394,7 +415,7 @@ fn encodePointer(
         },
         .many, .slice => {
             // first, let's error out in the [*]T case, because there's no way to know when to stop encoding
-            if (Ptr.size == .many and Ptr.sentinel() == null) {
+            if (ptr_info.size == .many and ptr_info.sentinel() == null) {
                 @compileError(@typeName(P) ++ " cannot be encoded because length cannot be determined");
             }
 
@@ -410,7 +431,7 @@ fn encodePointer(
             //
             // We can coerce the bottom two cases into []T / []const T by using std.mem.span.
             //
-            const slice = if (Ptr.size == .many) std.mem.span(data) else data;
+            const slice = if (ptr_info.size == .many) std.mem.span(data) else data;
 
             var bytes: usize = 0;
             // dealing with length
@@ -429,7 +450,7 @@ fn encodePointer(
             }
 
             // []u8, []const u8, etc
-            if (Ptr.child == u8) {
+            if (ptr_info.child == u8) {
                 try writer.writeAll(slice);
                 bytes += slice.len;
             } else {
@@ -447,15 +468,33 @@ fn encodePointer(
 
 // for a fixed size array, I guess I will just write each item independently
 fn encodeArray(
-    comptime A: std.builtin.Type.Array,
     data: anytype,
     writer: anytype,
-    encoding: Encoding(@TypeOf(data)),
+    comptime encoding: Encoding(@TypeOf(data)),
 ) !usize {
+    const Array: type = @TypeOf(data);
+    const array_info = @typeInfo(Array).array;
     var bytes: usize = 0;
-    inline for (0..A.len) |idx| {
-        bytes += try encode(data[idx], writer, encoding);
+    switch (encoding.length) {
+        .enabled => |lp| {
+            const C: type = lp.Counter();
+            const counter: C = @as(C, @intCast(array_info.len));
+            bytes += try encode(counter, writer, lp.encoding);
+        },
+        .disabled => {},
     }
+
+    const Payload = array_info.child;
+    if (Payload == u8) {
+        try writer.writeAll(&data);
+        bytes += array_info.len;
+    } else {
+        const item_encoding = encoding.items;
+        inline for (0..array_info.len) |idx| {
+            bytes += try encode(data[idx], writer, item_encoding);
+        }
+    }
+
     return bytes;
 }
 
@@ -548,11 +587,15 @@ pub fn Decoded(comptime T: type) type {
     };
 }
 
-fn decodeInt(comptime Int: type, reader: anytype, comptime encoding: IntEncoding) !Decoded(Int) {
+fn decodeInt(
+    comptime Int: type,
+    reader: anytype,
+    comptime encoding: IntEncoding,
+) !Decoded(Int) {
     switch (encoding) {
         .default => {
-            const NUM_BITS = comptime @bitSizeOf(Int);
-            const BYTES = comptime std.math.divExact(usize, NUM_BITS, 8) catch @compileError(@typeName(Int) ++ " is not byte sized (divisible by 8), cannot encode");
+            const NUM_BITS = @bitSizeOf(Int);
+            const BYTES = std.math.divExact(usize, NUM_BITS, 8) catch @compileError(@typeName(Int) ++ " is not byte sized (divisible by 8), cannot encode");
 
             const decoded: Int = try reader.readInt(Int, .big);
             return .{ .bytes_read = BYTES, .value = decoded };
@@ -562,8 +605,8 @@ fn decodeInt(comptime Int: type, reader: anytype, comptime encoding: IntEncoding
 }
 
 fn decodeVarnum(comptime VarNum: type, reader: anytype) !Decoded(VarNum) {
-    const BIT_SIZE = comptime @bitSizeOf(VarNum);
-    const MAX_BYTES = comptime std.math.divCeil(usize, BIT_SIZE, 7) catch unreachable;
+    const BIT_SIZE = @bitSizeOf(VarNum);
+    const MAX_BYTES = std.math.divCeil(usize, BIT_SIZE, 7) catch unreachable;
     var decoded: VarNum = 0;
     var bytes: usize = 0;
     while (true) {
@@ -591,7 +634,7 @@ fn decodeBool(reader: anytype) !Decoded(bool) {
 }
 
 fn decodeFloat(comptime Float: type, reader: anytype) !Decoded(Float) {
-    const NUM_BITS = comptime @bitSizeOf(Float);
+    const NUM_BITS = @bitSizeOf(Float);
 
     // craft protocol defined to only work for "float" and "double" aka f32, f64
     comptime {
@@ -734,9 +777,53 @@ fn decodeStruct(
     };
 }
 
-// fn decodeArray(comptime A: std.builtin.Type.Array, comptime Data: type, reader: anytype, allocator: std.mem.Allocator) !Decoded(Data) {
-fn decodeArray(comptime _: std.builtin.Type.Array, comptime Data: type, _: anytype, _: std.mem.Allocator) !Decoded(Data) {
-    @compileError("cannot decode " ++ @typeName(Data));
+fn decodeArray(
+    comptime Data: type,
+    reader: anytype,
+    allocator: std.mem.Allocator,
+    comptime encoding: Encoding(Data),
+) !Decoded(Data) {
+    const array_info = @typeInfo(Data).array;
+
+    var bytes: usize = 0;
+    switch (encoding.length) {
+        .enabled => |lp| {
+            const Counter: type = lp.Counter();
+            const c: Counter = (try decode(
+                Counter,
+                reader,
+                allocator,
+                lp.encoding,
+            )).unwrap(&bytes);
+
+            if (@as(usize, @intCast(c)) != array_info.len) {
+                return error.DecodeWrongSizedArray;
+            }
+        },
+        .disabled => {},
+    }
+
+    const Payload = array_info.child;
+    var out: Data = undefined;
+    if (Payload == u8) {
+        try reader.readNoEof(&out);
+        bytes += array_info.len;
+    } else {
+        const items_encoding = encoding.items;
+        inline for (&out) |*elem| {
+            elem.* = (try decode(
+                Payload,
+                reader,
+                allocator,
+                items_encoding,
+            )).unwrap(&bytes);
+        }
+    }
+
+    return .{
+        .bytes_read = bytes,
+        .value = out,
+    };
 }
 
 fn decodeOptional(
@@ -882,16 +969,40 @@ fn lengthStruct(data: anytype, comptime encoding: Encoding(@TypeOf(data))) !usiz
     return l;
 }
 
-fn lengthArray(data: anytype, comptime _: Encoding(@TypeOf(data))) usize {
-    @compileError("array is todo");
+fn lengthArray(
+    data: anytype,
+    comptime encoding: Encoding(@TypeOf(data)),
+) usize {
+    const Array: type = @TypeOf(data);
+    const array_info = @typeInfo(Array).array;
+    var bytes: usize = 0;
+    switch (encoding.length) {
+        .enabled => |lp| {
+            const C = lp.Counter();
+            const count = @as(C, @intCast(array_info.len));
+            bytes += try length(count, lp.encoding);
+        },
+        .disabled => {},
+    }
+
+    const Payload = array_info.child;
+    if (Payload == u8) {
+        bytes += array_info.len;
+    } else {
+        const items_encoding = encoding.items;
+        inline for (data) |item| {
+            bytes += try length(item, items_encoding);
+        }
+    }
+
+    return bytes;
 }
 
-fn lengthOptional(data: anytype, comptime encoding: Encoding(@TypeOf(data))) !usize {
-    if (data == null) {
-        return 1;
-    } else {
-        return 1 + (try length(data.?, encoding));
-    }
+fn lengthOptional(
+    data: anytype,
+    comptime encoding: Encoding(@TypeOf(data)),
+) !usize {
+    return (if (data) |d| try length(d, encoding) else 0) + 1;
 }
 
 fn lengthEnum(data: anytype, comptime encoding: Encoding(@TypeOf(data))) !usize {

@@ -3,10 +3,9 @@ const CraftTypes = @import("CraftTypes.zig");
 
 const UUID = @This();
 
-pub const CRAFT_LENGTH: usize = 16;
-pub const CraftEncoding = void;
+pub const BYTES: usize = 16;
 
-raw: [CRAFT_LENGTH]u8,
+raw: [BYTES]u8,
 
 pub fn fromStr(repr: []const u8) !UUID {
     return .{ .raw = try Parser.parse(repr) };
@@ -26,17 +25,6 @@ pub fn format(uuid: *const UUID, comptime fmt: []const u8, _: std.fmt.FormatOpti
     if (fmt.len != 0) std.fmt.invalidFmtError(fmt, uuid);
     var emitter: Emitter(@TypeOf(writer)) = .{ .raw = &uuid.raw, .writer = writer };
     try emitter.emit();
-}
-
-pub fn craftEncode(uuid: UUID, writer: anytype, _: CraftEncoding) !usize {
-    try writer.writeAll(&uuid.raw);
-    return CRAFT_LENGTH;
-}
-
-pub fn craftDecode(reader: anytype, _: std.mem.Allocator, _: CraftEncoding) !CraftTypes.Decoded(UUID) {
-    var out: UUID = undefined;
-    try reader.readNoEof(&out.raw);
-    return .{ .bytes_read = CRAFT_LENGTH, .value = out };
 }
 
 fn Emitter(Writer: type) type {
@@ -104,7 +92,7 @@ const Parser = struct {
 
     fn parse(input: []const u8) ![16]u8 {
         var parser: Parser = .{ .input = input };
-        var out: [CRAFT_LENGTH]u8 = undefined;
+        var out: [BYTES]u8 = undefined;
         try parser.consumeGroup(out[0..4]);
         const has_hyphens = try parser.consumeHyphen(true);
         try parser.consumeGroup(out[4..6]);
