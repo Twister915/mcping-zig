@@ -165,10 +165,10 @@ fn StructEncoding(comptime Struct: type) type {
         return Struct.CraftEncoding;
     }
 
-    const S = @typeInfo(Struct).@"struct";
+    const struct_info = @typeInfo(Struct).@"struct";
 
-    comptime var encoding_fields: [S.fields.len]std.builtin.Type.StructField = undefined;
-    for (S.fields, &encoding_fields) |struct_field, *encoding_field| {
+    comptime var encoding_fields: [struct_info.fields.len]std.builtin.Type.StructField = undefined;
+    for (struct_info.fields, &encoding_fields) |struct_field, *encoding_field| {
         const StructFieldEncoding = Encoding(struct_field.type);
         const default_value = defaultEncoding(struct_field.type);
         encoding_field.* = .{
@@ -215,19 +215,19 @@ pub const LengthPrefixEncoding = struct {
 pub const DEFAULT_LENGTH_ENCODING: LengthEncoding = .{};
 
 fn PointerEncoding(comptime P: type) type {
-    const Ptr = @typeInfo(P).pointer;
-    switch (Ptr.size) {
-        .one => return Encoding(Ptr.child),
+    const pointer_info = @typeInfo(P).pointer;
+    switch (pointer_info.size) {
+        .one => return Encoding(pointer_info.child),
         .many, .slice => {
             // covers: []T, [*]T, [:senti]T, [*:senti]T
-            if (Ptr.size == .many and Ptr.sentinel() == null) {
+            if (pointer_info.size == .many and pointer_info.sentinel() == null) {
                 @compileError("cannot encode " ++ @typeName(P) ++ " because has no known size (use sentinel or slice)");
             }
 
-            const ItemsEncoding = Encoding(Ptr.child);
+            const ItemsEncoding = Encoding(pointer_info.child);
             return struct {
                 length: LengthEncoding = DEFAULT_LENGTH_ENCODING,
-                items: ItemsEncoding = defaultEncoding(Ptr.child),
+                items: ItemsEncoding = defaultEncoding(pointer_info.child),
             };
         },
         else => @compileError("unable to describe encoding for " ++ @typeName(P)),
@@ -246,19 +246,17 @@ fn ArrayEncoding(comptime Array: type) type {
 
 fn UnionEncoding(comptime U: type) type {
     const Tag = WireTagFor(U);
-    const TagEncoding = Encoding(Tag);
-    const FieldsEncoding = UnionFieldsEncoding(U);
 
     return struct {
-        tag: TagEncoding = defaultEncoding(Tag),
-        fields: FieldsEncoding = .{},
+        tag: Encoding(Tag) = defaultEncoding(Tag),
+        fields: UnionFieldsEncoding(U) = .{},
     };
 }
 
 fn UnionFieldsEncoding(comptime U: type) type {
-    const Union = @typeInfo(U).@"union";
-    var encoding_fields: [Union.fields.len]std.builtin.Type.StructField = undefined;
-    for (Union.fields, &encoding_fields) |union_field, *encoding_field| {
+    const union_info = @typeInfo(U).@"union";
+    var encoding_fields: [union_info.fields.len]std.builtin.Type.StructField = undefined;
+    for (union_info.fields, &encoding_fields) |union_field, *encoding_field| {
         const FieldEncoding = Encoding(union_field.type);
         const default_value = defaultEncoding(union_field.type);
         encoding_field.* = .{
@@ -303,13 +301,58 @@ fn encodeInt(
     }
 }
 
+test "encode i16 .default" {
+    const TestCase = struct {
+        input: i16,
+        expected: [2]u8,
+    };
+
+    const test_cases: []const TestCase = &.{
+        .{ .input = 1, .expected = .{ 0x00, 0x01 } },
+        .{ .input = -1, .expected = .{ 0xFF, 0xFF } },
+        .{ .input = 256, .expected = .{ 0x01, 0x00 } },
+    };
+
+    for (test_cases) |test_case| {
+        var array_list = std.ArrayList(u8).init(std.testing.allocator);
+        defer array_list.deinit();
+
+        const bytes = try encode(test_case.input, array_list.writer(), .default);
+        try std.testing.expectEqual(2, bytes);
+        try std.testing.expectEqualSlices(u8, &test_case.expected, array_list.items);
+    }
+}
+
+test "encode i32 .default" {
+    const TestCase = struct {
+        input: i32,
+        expected: [4]u8,
+    };
+
+    const test_cases: []const TestCase = &.{
+        .{ .input = 1, .expected = .{ 0x00, 0x00, 0x00, 0x01 } },
+        .{ .input = -1, .expected = .{ 0xFF, 0xFF, 0xFF, 0xFF } },
+        .{ .input = 256, .expected = .{ 0x00, 0x00, 0x01, 0x00 } },
+        .{ .input = 65536, .expected = .{ 0x00, 0x01, 0x00, 0x00 } },
+    };
+
+    for (test_cases) |test_case| {
+        var array_list = std.ArrayList(u8).init(std.testing.allocator);
+        defer array_list.deinit();
+
+        const bytes = try encode(test_case.input, array_list.writer(), .default);
+        try std.testing.expectEqual(4, bytes);
+        try std.testing.expectEqualSlices(u8, &test_case.expected, array_list.items);
+    }
+}
+
 // "var num" such as VarInt, VarLong
 fn encodeVarnum(data: anytype, writer: anytype) !usize {
-    const VarNumType = @TypeOf(data);
-    const NUM_BITS = @bitSizeOf(VarNumType);
-    const MAX_BYTES = std.math.divCeil(usize, NUM_BITS, 7) catch unreachable;
+    const IntType = @TypeOf(data);
+    const UIntType = UnsignedIntEquiv(IntType);
+    const MAX_BYTES = std.math.divCeil(usize, @bitSizeOf(IntType), 7) catch unreachable;
 
-    var to_encode: UnsignedIntEquiv(VarNumType) = @intCast(data);
+    var to_encode: UIntType = @intCast(data);
     var bytes: usize = 0;
     var buf: [MAX_BYTES]u8 = undefined;
     for (&buf) |*b| {
@@ -366,11 +409,11 @@ fn encodeOptional(
     writer: anytype,
     comptime encoding: Encoding(@TypeOf(data)),
 ) !usize {
-    if (data) |payload| {
-        return try encode(true, writer, {}) + try encode(payload, writer, encoding);
-    } else {
-        return try encode(false, writer, {});
-    }
+    return (try encode(data != null, writer, {})) +
+        (if (data) |payload|
+            try encode(payload, writer, encoding)
+        else
+            0);
 }
 
 // for a struct, let's just encode each field in the order it's declared
@@ -832,14 +875,30 @@ fn decodeOptional(
     allocator: std.mem.Allocator,
     comptime encoding: Encoding(Data),
 ) !Decoded(Data) {
-    const Opt = @typeInfo(Data).optional;
-    var out: Decoded(Data) = undefined;
-    out.bytes_read = 0;
+    const optional_info = @typeInfo(Data).optional;
 
-    const has_payload: bool = (try decode(bool, reader, allocator, {})).unwrap(&out.bytes_read);
+    // setup output
+    var out: Decoded(Data) = .{
+        .value = undefined,
+        .bytes_read = 0,
+    };
 
-    if (has_payload) {
-        out.value = (try decode(Opt.child, reader, allocator, encoding)).unwrap(&out.bytes_read);
+    // decode a bool flag (true = present, false = absent)
+    const bool_flag: bool = (try decode(
+        bool,
+        reader,
+        allocator,
+        {},
+    )).unwrap(&out.bytes_read);
+
+    if (bool_flag) {
+        // decode a payload item if bool flag was true
+        out.value = (try decode(
+            optional_info.child,
+            reader,
+            allocator,
+            encoding,
+        )).unwrap(&out.bytes_read);
     } else {
         out.value = null;
     }
@@ -853,14 +912,46 @@ fn decodeEnum(
     allocator: std.mem.Allocator,
     comptime encoding: Encoding(Enum),
 ) !Decoded(Enum) {
+    const enum_info = @typeInfo(Enum).@"enum";
+
+    // decode wire tag
     const WireTag: type = WireTagFor(Enum);
-    const wire_tag_decoded: Decoded(WireTag) = try decode(WireTag, reader, allocator, encoding);
-    var decoded: Enum = undefined;
-    if (std.meta.hasFn(Enum, CRAFT_TAG_FN_NAME)) {
-        @compileError(CRAFT_TAG_FN_NAME ++ " is unsupported in decode TODO");
-    } else {
-        decoded = try std.meta.intToEnum(Enum, wire_tag_decoded.value);
-    }
+    const wire_tag_decoded: Decoded(WireTag) = try decode(
+        WireTag,
+        reader,
+        allocator,
+        encoding,
+    );
+
+    const wire_tag_value = wire_tag_decoded.value;
+
+    // convert to enum
+    const decoded: Enum = compute_value: {
+        // if the enum has the custom craft tag function...
+        if (std.meta.hasFn(Enum, CRAFT_TAG_FN_NAME)) {
+            // go through all possible enum variants...
+            inline for (enum_info.fields) |enum_field| {
+                // calculate the craft tag for this value
+                const enum_value: Enum = @enumFromInt(enum_field.value);
+                const tag_value: WireTag = @field(enum_value, CRAFT_TAG_FN_NAME)();
+
+                // if the tag matches the value decoded, then use this enum variant
+                if (tag_value == wire_tag_value) {
+                    break :compute_value enum_value;
+                }
+            }
+
+            // after looping through all possibilities, there were no matches, so return InvalidEnumTag
+            return error.InvalidEnumTag;
+        } else if (WireTag == enum_info.tag_type) {
+            // there is no custom craft tag function, so use the built-in tag type for this enum (an integer type)
+            break :compute_value try std.meta.intToEnum(Enum, wire_tag_value);
+        } else {
+            // the WireTag was not the enum tag type, this is a compile error
+            // should also be unreachable because of how WireTag is defined
+            @compileError("cannot convert tag type " ++ @typeName(WireTag) ++ " to enum type " ++ @typeName(Enum));
+        }
+    };
 
     return .{
         .value = decoded,
