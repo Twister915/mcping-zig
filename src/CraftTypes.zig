@@ -1,7 +1,3 @@
-comptime {
-    @setEvalBranchQuota(10000);
-}
-
 const std = @import("std");
 
 pub const MAX_PACKET_SIZE: usize = 0x1FFFFF;
@@ -350,7 +346,7 @@ test "encode i32 .default" {
 fn encodeVarnum(data: anytype, writer: anytype) !usize {
     const IntType = @TypeOf(data);
     const UIntType = UnsignedIntEquiv(IntType);
-    const MAX_BYTES = std.math.divCeil(usize, @bitSizeOf(IntType), 7) catch unreachable;
+    const MAX_BYTES = comptime std.math.divCeil(usize, @bitSizeOf(IntType), 7) catch unreachable;
 
     var to_encode: UIntType = @intCast(data);
     var bytes: usize = 0;
