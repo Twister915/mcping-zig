@@ -6,6 +6,8 @@ const BUF_SIZE = 256;
 const bufReader = std.io.BufferedReader(BUF_SIZE, net.Stream.Reader);
 
 socket: net.Stream,
+address: []const u8,
+port: u16,
 reader: bufReader,
 buf: std.ArrayList(u8),
 compression: Compression = .disabled,
@@ -27,6 +29,8 @@ pub fn connect(allocator: std.mem.Allocator, address: []const u8, port: u16) !Co
     const stream = try net.tcpConnectToHost(allocator, address, port);
     return .{
         .socket = stream,
+        .address = try allocator.dupe(u8, address),
+        .port = port,
         .reader = .{ .unbuffered_reader = stream.reader() },
         .buf = std.ArrayList(u8).init(allocator),
         .allocator = allocator,
@@ -40,19 +44,7 @@ pub fn deinit(conn: Conn) void {
     }
     conn.buf.deinit();
     conn.socket.close();
-}
-
-pub fn DecodedPkt(comptime Pkt: type) type {
-    return struct {
-        packet: Pkt,
-        arena: *std.heap.ArenaAllocator,
-        allocator: std.mem.Allocator,
-
-        pub fn deinit(ctr: @This()) void {
-            ctr.arena.deinit();
-            ctr.allocator.destroy(ctr.arena);
-        }
-    };
+    conn.allocator.free(conn.address);
 }
 
 pub const ReadPkt = struct {
@@ -63,37 +55,52 @@ pub const ReadPkt = struct {
     const Self = @This();
 
     // if you call this, we decode the packet into owned memory (call deinit() on the returned T)
-    pub fn decodeAs(self: Self, comptime T: type, allocator: std.mem.Allocator) !DecodedPkt(T) {
+    pub fn decodeAs(self: Self, comptime T: type, arena_allocator: *std.heap.ArenaAllocator) !T {
         const encoding = comptime defaultPacketEncoding(T);
-
-        var arena = try allocator.create(std.heap.ArenaAllocator);
-        arena.* = std.heap.ArenaAllocator.init(allocator);
-        const arena_allocator = arena.allocator();
-
         var stream = std.io.fixedBufferStream(self.data);
+        const decoded: CraftTypes.Decoded(T) = try CraftTypes.decode(
+            T,
+            stream.reader(),
+            arena_allocator,
+            encoding,
+        );
         const expected_len = self.data.len;
-        const decoded: CraftTypes.Decoded(T) = try CraftTypes.decode(T, stream.reader(), arena_allocator, encoding);
         if (decoded.bytes_read != expected_len) {
             return error.PacketNotCompletelyParsed;
         }
-        return .{
-            .packet = decoded.value,
-            .arena = arena,
-            .allocator = allocator,
-        };
+        return decoded.value;
+    }
+
+    pub fn decodeWithoutArena(self: Self, comptime T: type, allocator: std.mem.Allocator) !OwnedPacket(T) {
+        const arena_allocator = try allocator.create(std.heap.ArenaAllocator);
+        arena_allocator.* = .init(allocator);
+
+        const packet = try self.decodeAs(T, arena_allocator);
+        return .{ .packet = packet, .arena = arena_allocator };
     }
 };
+
+pub fn OwnedPacket(comptime Payload: type) type {
+    return struct {
+        packet: Payload,
+        arena: *std.heap.ArenaAllocator,
+
+        pub fn deinit(self: @This()) void {
+            self.arena.deinit();
+        }
+    };
+}
 
 pub fn readPacket(conn: *Conn) !ReadPkt {
     conn.clearBuffers();
 
     const reader = conn.reader.reader();
-    const pkt_length: usize = @intCast((try CraftTypes.decode(i32, reader, conn.allocator, .varnum)).value);
+    const pkt_length: usize = @intCast((try CraftTypes.decodeInt(i32, reader, .varnum)).value);
 
     var id_and_body: []u8 = undefined;
     switch (conn.compression) {
         .enabled => |*compress| {
-            const data_length_decoded = try CraftTypes.decode(i32, reader, conn.allocator, .varnum);
+            const data_length_decoded = try CraftTypes.decodeInt(i32, reader, .varnum);
             const data_length: usize = @intCast(data_length_decoded.value);
             const bytes_left = pkt_length - data_length_decoded.bytes_read;
             if (data_length == 0) {
@@ -120,10 +127,9 @@ pub fn readPacket(conn: *Conn) !ReadPkt {
         },
     }
 
-    std.debug.print("rx: {any}\n", .{id_and_body});
     var id_body_stream = std.io.fixedBufferStream(id_and_body);
     const id_body_reader = id_body_stream.reader();
-    const packet_id_decoded = try CraftTypes.decode(i32, id_body_reader, conn.allocator, .varnum);
+    const packet_id_decoded = try CraftTypes.decodeInt(i32, id_body_reader, .varnum);
     return .{
         .id = packet_id_decoded.value,
         .data = id_and_body[packet_id_decoded.bytes_read..],
@@ -177,7 +183,6 @@ pub fn writePacket(conn: *Conn, id: i32, packet: anytype) !usize {
 
     const bytes_to_send = conn.buf.items;
     try conn.socket.writeAll(bytes_to_send);
-    std.debug.print("tx: {any}\n", .{bytes_to_send});
     return bytes_to_send.len;
 }
 

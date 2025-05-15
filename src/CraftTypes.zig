@@ -38,7 +38,7 @@ pub fn encode(
 pub fn decode(
     comptime Data: type,
     reader: anytype,
-    allocator: std.mem.Allocator,
+    allocator: *std.heap.ArenaAllocator,
     comptime encoding: Encoding(Data),
 ) !Decoded(Data) {
     if (std.meta.hasFn(Data, "craftDecode")) {
@@ -626,7 +626,7 @@ pub fn Decoded(comptime T: type) type {
     };
 }
 
-fn decodeInt(
+pub fn decodeInt(
     comptime Int: type,
     reader: anytype,
     comptime encoding: IntEncoding,
@@ -698,15 +698,18 @@ fn decodeFloat(comptime Float: type, reader: anytype) !Decoded(Float) {
 fn decodePointer(
     comptime Data: type,
     reader: anytype,
-    allocator: std.mem.Allocator,
+    arena_allocator: *std.heap.ArenaAllocator,
     comptime encoding: Encoding(Data),
 ) !Decoded(Data) {
+    const allocator = arena_allocator.allocator();
     const Ptr = @typeInfo(Data).pointer;
     const Payload = Ptr.child;
     switch (Ptr.size) {
         .one => {
             // *T
             const allocated_ptr: NonConstPointer(Data) = try allocator.create(Payload);
+            errdefer allocator.destroy(allocated_ptr);
+
             const decoded_payload = try decode(Payload, reader, allocator, encoding);
             allocated_ptr.* = decoded_payload.value;
             return .{ .bytes_read = decoded_payload.bytes_read, .value = allocated_ptr };
@@ -724,6 +727,7 @@ fn decodePointer(
                             error.StreamTooLong => return error.PacketTooBig,
                             else => return err,
                         };
+                        errdefer allocator.free(dst);
                         bytes = dst.len;
                     } else {
                         @compileError(@typeName(Data) ++ " cannot be decoded without length prefix (unsupported, but TODO)");
@@ -732,7 +736,7 @@ fn decodePointer(
                 .enabled => |lp| {
                     // decode the counter from the wire
                     const Counter = lp.Counter();
-                    const count: usize = @intCast((try decode(Counter, reader, allocator, lp.encoding)).unwrap(&bytes));
+                    const count: usize = @intCast((try decodeInt(Counter, reader, lp.encoding)).unwrap(&bytes));
                     if (count > length_encoding.max) {
                         return error.PacketTooBig;
                     }
@@ -748,6 +752,7 @@ fn decodePointer(
                     } else {
                         dst = try allocator.alloc(Payload, count);
                     }
+                    errdefer allocator.free(dst);
 
                     // decode the sized data
                     if (Payload == u8) {
@@ -797,7 +802,7 @@ fn NonConstPointer(comptime Slice: type) type {
 fn decodeStruct(
     comptime Data: type,
     reader: anytype,
-    allocator: std.mem.Allocator,
+    allocator: *std.heap.ArenaAllocator,
     comptime encoding: Encoding(Data),
 ) !Decoded(Data) {
     const S = @typeInfo(Data).@"struct";
@@ -819,7 +824,7 @@ fn decodeStruct(
 fn decodeArray(
     comptime Data: type,
     reader: anytype,
-    allocator: std.mem.Allocator,
+    allocator: *std.heap.ArenaAllocator,
     comptime encoding: Encoding(Data),
 ) !Decoded(Data) {
     const array_info = @typeInfo(Data).array;
@@ -868,7 +873,7 @@ fn decodeArray(
 fn decodeOptional(
     comptime Data: type,
     reader: anytype,
-    allocator: std.mem.Allocator,
+    allocator: *std.heap.ArenaAllocator,
     comptime encoding: Encoding(Data),
 ) !Decoded(Data) {
     const optional_info = @typeInfo(Data).optional;
@@ -905,7 +910,7 @@ fn decodeOptional(
 fn decodeEnum(
     comptime Enum: type,
     reader: anytype,
-    allocator: std.mem.Allocator,
+    allocator: *std.heap.ArenaAllocator,
     comptime encoding: Encoding(Enum),
 ) !Decoded(Enum) {
     const enum_info = @typeInfo(Enum).@"enum";
@@ -958,7 +963,7 @@ fn decodeEnum(
 fn decodeUnion(
     comptime Union: type,
     reader: anytype,
-    allocator: std.mem.Allocator,
+    allocator: *std.heap.ArenaAllocator,
     comptime encoding: Encoding(Union),
 ) !Decoded(Union) {
     const union_info = @typeInfo(Union).@"union";

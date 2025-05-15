@@ -10,36 +10,49 @@ pub const std_options: std.Options = .{
 
 pub fn main() !void {
     // 64k stack buffer for heap, should be fine since we only have to allocate the status string
-    var buffer: [0x10000]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&buffer);
-    const allocator = fba.allocator();
+    var gpa = std.heap.GeneralPurposeAllocator(.{
+        .verbose_log = std.debug.runtime_safety,
+    }).init;
+    if (std.debug.runtime_safety) {
+        defer _ = gpa.detectLeaks();
+    }
+
+    const allocator = gpa.allocator();
 
     var any: bool = false;
     var args = std.process.args();
     _ = args.skip();
     while (args.next()) |arg| {
-        const target = targetFromArg(arg) catch |err| {
-            std.debug.print("error parsing argument {s} -> {any}\n", .{ arg, err });
-            continue;
-        };
-
-        pingPrint(allocator, target) catch |err| {
-            std.debug.print("error while pinging {s} -> {any}\n", .{ arg, err });
-        };
-
-        loginOffline(allocator, target, .{
-            .username = "Notch",
-            .uuid = .random(std.crypto.random),
-        }) catch |err| {
-            std.debug.print("error while logging into server {s} -> {any}\n", .{ arg, err });
-        };
-
+        handleTarget(allocator, arg);
         any = true;
     }
 
     if (!any) {
-        std.debug.print("error: must specify at least one target host\n", .{});
+        // this is a hack for debugging from within vscode
+        if (std.debug.runtime_safety) {
+            handleTarget(allocator, "rpi4.jhome");
+        } else {
+            std.debug.print("error: must specify at least one target host\n", .{});
+        }
     }
+}
+
+fn handleTarget(allocator: std.mem.Allocator, arg: []const u8) void {
+    const target = targetFromArg(arg) catch |err| {
+        std.debug.print("error parsing argument {s} -> {any}\n", .{ arg, err });
+        return;
+    };
+
+    pingPrint(allocator, target) catch |err| {
+        std.debug.print("error while pinging {s} -> {any}\n", .{ arg, err });
+    };
+
+    loginOffline(allocator, target, .{
+        .username = "Notch",
+        .uuid = .random(std.crypto.random),
+    }) catch |err| {
+        std.debug.print("error while logging into server {s} -> {any}\n", .{ arg, err });
+    };
 }
 
 fn targetFromArg(raw: []const u8) !Target {
@@ -59,12 +72,13 @@ fn targetFromArg(raw: []const u8) !Target {
 }
 
 fn pingPrint(allocator: std.mem.Allocator, target: Target) !void {
-    const response = try ping(allocator, target);
-    defer response.deinit();
+    var arena_allocator = std.heap.ArenaAllocator.init(allocator);
+    defer arena_allocator.deinit();
 
+    const response = try ping(target, &arena_allocator);
     std.debug.print("{?d}ms {s}\n", .{
         response.latency_ms,
-        response.status_response_packet.packet.status,
+        response.status,
     });
 }
 
@@ -80,17 +94,12 @@ const Profile = struct {
 };
 
 const PingResponse = struct {
-    status_response_packet: CraftConn.DecodedPkt(CraftPacket.StatusResponsePacket),
+    status: []const u8,
     latency_ms: ?i64 = null,
-
-    const Self = @This();
-
-    fn deinit(self: Self) void {
-        self.status_response_packet.deinit();
-    }
 };
 
-fn ping(allocator: std.mem.Allocator, target: Target) !PingResponse {
+fn ping(target: Target, arena_allocator: *std.heap.ArenaAllocator) !PingResponse {
+    const allocator = arena_allocator.allocator();
     var conn = try CraftConn.connect(allocator, target.host, target.port);
     defer conn.deinit();
 
@@ -102,29 +111,30 @@ fn ping(allocator: std.mem.Allocator, target: Target) !PingResponse {
     });
 
     _ = try conn.writePacket(0x00, {});
-    // we return this packet in PingResponse, so the caller to ping owns the memory allocated by decoding this packet
-    const status_response_packet = try (try conn.readPacket()).decodeAs(CraftPacket.StatusResponsePacket, allocator);
-
+    const status_response_packet = try (try conn.readPacket()).decodeAs(
+        CraftPacket.StatusResponsePacket,
+        arena_allocator,
+    );
     const ping_at_ms = std.time.milliTimestamp();
     _ = try conn.writePacket(0x01, CraftPacket.StatusPingPongPacket{ .timestamp = ping_at_ms });
 
-    const pong_ts = do_pong: {
-        const pong_packet = try (try conn.readPacket()).decodeAs(CraftPacket.StatusPingPongPacket, allocator);
-        defer pong_packet.deinit();
-        break :do_pong pong_packet.packet.timestamp;
+    const pong_ts: i64 = (try (try conn.readPacket()).decodeAs(CraftPacket.StatusPingPongPacket, arena_allocator)).timestamp;
+    const pong_rcv_at = std.time.milliTimestamp();
+    return .{
+        .status = status_response_packet.status,
+        .latency_ms = if (pong_ts == ping_at_ms) pong_rcv_at - pong_ts else null,
     };
-
-    var out: PingResponse = .{ .status_response_packet = status_response_packet };
-    if (pong_ts == ping_at_ms) {
-        const pong_rcv_at = std.time.milliTimestamp();
-        out.latency_ms = pong_rcv_at - ping_at_ms;
-    }
-    return out;
 }
 
 fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile) !void {
     var conn = try CraftConn.connect(allocator, target.host, target.port);
     defer conn.deinit();
+
+    // use "allocator" for the connection itself, but use arena_allocator for deserializing packets
+    // so that we can reset the arena_allocator after we finish processing each packet
+    var arena_allocator = std.heap.ArenaAllocator.init(allocator);
+    defer arena_allocator.deinit();
+
     // state = handshaking
     _ = try conn.writePacket(0x00, CraftPacket.HandshakingPacket{
         .address = target.host,
@@ -145,24 +155,25 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile) 
         const login_packet = try conn.readPacket();
         switch (login_packet.id) {
             0x00 => {
-                const disconnect_packet = try login_packet.decodeAs(CraftPacket.DisconnectPacket, allocator);
-                defer disconnect_packet.deinit();
+                const disconnect_packet = try login_packet.decodeAs(CraftPacket.DisconnectPacket, &arena_allocator);
+                defer _ = arena_allocator.reset(.retain_capacity);
 
-                std.debug.print("disconnected from {s} ---> {s}\n", .{ target.host, disconnect_packet.packet.reason });
+                std.debug.print("disconnected from {s} ---> {s}\n", .{ target.host, disconnect_packet.reason });
                 return error.Disconnected;
             },
             0x01 => {
                 // encryption request
-                const encryption_request_packet = try login_packet.decodeAs(CraftPacket.EncryptionRequestPacket, allocator);
-                defer encryption_request_packet.deinit();
+                const encryption_request_packet = try login_packet.decodeAs(CraftPacket.EncryptionRequestPacket, &arena_allocator);
+                defer _ = arena_allocator.reset(.retain_capacity);
 
-                std.debug.print("encryption requested ({}), not supported!\n", .{encryption_request_packet.packet});
+                std.debug.print("encryption requested ({}), not supported!\n", .{encryption_request_packet});
                 return error.EncryptionRequested;
             },
             0x02 => {
                 // login success
-                const login_success_packet = try login_packet.decodeAs(CraftPacket.LoginSuccessPacket, allocator);
-                defer login_success_packet.deinit();
+                // we skip decode because we don't use the data
+                // const login_success_packet = try login_packet.decodeAs(CraftPacket.LoginSuccessPacket, &arena_allocator);
+                // defer arena_allocator.reset(.retain_capacity);
 
                 // send login acknowledged
                 _ = try conn.writePacket(0x03, {});
@@ -170,10 +181,10 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile) 
             },
             0x03 => {
                 // set compression
-                const set_compression_packet = try login_packet.decodeAs(CraftPacket.SetCompressionPacket, allocator);
-                defer set_compression_packet.deinit();
+                const set_compression_packet = try login_packet.decodeAs(CraftPacket.SetCompressionPacket, &arena_allocator);
+                defer _ = arena_allocator.reset(.retain_capacity);
 
-                try conn.setCompressionThreshold(@intCast(set_compression_packet.packet.threshold));
+                try conn.setCompressionThreshold(@intCast(set_compression_packet.threshold));
             },
             0x04 => {
                 // login plugin message
@@ -186,12 +197,12 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile) 
                 //
                 // so that's what I'm going to do... send empty LoginPluginResponsePacket
 
-                const ping_request_packet = try login_packet.decodeAs(CraftPacket.LoginPluginRequestPacket, allocator);
-                defer ping_request_packet.deinit();
+                const ping_request_packet = try login_packet.decodeAs(CraftPacket.LoginPluginRequestPacket, &arena_allocator);
+                defer _ = arena_allocator.reset(.retain_capacity);
 
                 // login plugin response = 0x02
                 _ = try conn.writePacket(0x02, CraftPacket.LoginPluginResponsePacket{
-                    .message_id = ping_request_packet.packet.message_id,
+                    .message_id = ping_request_packet.message_id,
                     .data = null,
                 });
             },
@@ -199,11 +210,11 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile) 
                 // cookie request
                 // we don't have cookie storage yet, so let's just send back an empty cookie packet
 
-                const cookie_request_packet = try login_packet.decodeAs(CraftPacket.LoginCookieRequestPacket, allocator);
-                defer cookie_request_packet.deinit();
+                const cookie_request_packet = try login_packet.decodeAs(CraftPacket.LoginCookieRequestPacket, &arena_allocator);
+                defer _ = arena_allocator.reset(.retain_capacity);
 
                 _ = try conn.writePacket(0x04, CraftPacket.LoginCookieResponsePacket{
-                    .key = cookie_request_packet.packet.key, // borrow so we don't deinit twice
+                    .key = cookie_request_packet.key, // borrow so we don't deinit twice
                     .payload = null,
                 });
             },
