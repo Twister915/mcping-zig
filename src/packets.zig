@@ -1,5 +1,5 @@
 const std = @import("std");
-const CraftTypes = @import("CraftTypes.zig");
+const craft_io = @import("io.zig");
 const UUID = @import("UUID.zig");
 
 // state = handshake
@@ -13,7 +13,7 @@ pub const HandshakingPacket = struct {
         transfer = 3,
     },
 
-    const Encoding = CraftTypes.Encoding(@This());
+    const Encoding = craft_io.Encoding(@This());
     pub const ENCODING: Encoding = .{
         .version = .varnum,
         .next_state = .varnum,
@@ -32,7 +32,7 @@ test "encode handshaking packet" {
     var buf = std.ArrayList(u8).init(std.testing.allocator);
     defer buf.deinit();
 
-    _ = try CraftTypes.encode(pkt, buf.writer(), HandshakingPacket);
+    _ = try craft_io.encode(pkt, buf.writer(), HandshakingPacket);
     std.debug.print("\nin: {any}\nencoding: {any}\nout:{any}\n", .{ pkt, HandshakingPacket.ENCODING, buf.items });
 }
 
@@ -40,7 +40,7 @@ test "encode handshaking packet" {
 pub const StatusResponsePacket = struct {
     status: []const u8,
 
-    const Encoding = CraftTypes.Encoding(@This());
+    const Encoding = craft_io.Encoding(@This());
     pub const ENCODING: Encoding = .{ .status = .{ .length = .{ .max = 0x7FFF } } };
 };
 
@@ -59,7 +59,7 @@ pub const EncryptionRequestPacket = struct {
     verify_token: []const u8, // bytes
     should_authenticate: bool,
 
-    const Encoding = CraftTypes.Encoding(@This());
+    const Encoding = craft_io.Encoding(@This());
     pub const ENCODING: Encoding = .{ .server_id = .{ .length = .{ .max = 20 } } };
 };
 
@@ -68,7 +68,7 @@ pub const LoginSuccessPacket = struct {
     username: []const u8,
     properties: []const Property,
 
-    const Encoding = CraftTypes.Encoding(@This());
+    const Encoding = craft_io.Encoding(@This());
     pub const ENCODING: Encoding = .{ .username = .{ .length = .{ .max = 0x10 } } };
 
     pub const Property = struct {
@@ -76,7 +76,7 @@ pub const LoginSuccessPacket = struct {
         value: []const u8,
         signature: ?[]const u8,
 
-        const PropertyEncoding = CraftTypes.Encoding(@This());
+        const PropertyEncoding = craft_io.Encoding(@This());
         pub const ENCODING: PropertyEncoding = .{
             .name = .{ .length = .{ .max = 0x40 } },
             .value = .{ .length = .{ .max = 0x7FFF } },
@@ -106,15 +106,15 @@ test "encode login success packet" {
     var buf = std.ArrayList(u8).init(std.testing.allocator);
     defer buf.deinit();
 
-    const login_success_encoding: CraftTypes.Encoding(LoginSuccessPacket) = .{};
-    _ = try CraftTypes.encode(pkt, buf.writer(), login_success_encoding);
+    const login_success_encoding: craft_io.Encoding(LoginSuccessPacket) = .{};
+    _ = try craft_io.encode(pkt, buf.writer(), login_success_encoding);
     std.debug.print(
         "\nin: {any}\nencoding: {any}\nout:{any}\nlength(pkt): pred={d}, act={d}\n",
         .{
             pkt,
             login_success_encoding,
             buf.items,
-            try CraftTypes.length(pkt, login_success_encoding),
+            try craft_io.length(pkt, login_success_encoding),
             buf.items.len,
         },
     );
@@ -123,7 +123,7 @@ test "encode login success packet" {
 pub const SetCompressionPacket = struct {
     threshold: i32,
 
-    pub const Encoding = CraftTypes.Encoding(@This());
+    pub const Encoding = craft_io.Encoding(@This());
     pub const ENCODING: Encoding = .{ .threshold = .varnum };
 };
 
@@ -132,7 +132,7 @@ pub const LoginPluginRequestPacket = struct {
     channel: []const u8, // identifer
     data: []const u8,
 
-    pub const Encoding = CraftTypes.Encoding(@This());
+    pub const Encoding = craft_io.Encoding(@This());
     pub const ENCODING: Encoding = .{
         .channel = .{ .length = .{ .max = 0x7FFF } },
         .data = .{ .length = .{ .prefix = .disabled, .max = 0x100000 } },
@@ -147,7 +147,7 @@ pub const LoginStartPacket = struct {
     name: []const u8,
     uuid: UUID,
 
-    pub const Encoding = CraftTypes.Encoding(@This());
+    pub const Encoding = craft_io.Encoding(@This());
     pub const ENCODING: Encoding = .{
         .name = .{ .length = .{ .max = 0x10 } },
     };
@@ -162,7 +162,7 @@ pub const LoginPluginResponsePacket = struct {
     message_id: i32,
     data: ?[]const u8,
 
-    pub const Encoding = CraftTypes.Encoding(@This());
+    pub const Encoding = craft_io.Encoding(@This());
     pub const ENCODING: Encoding = .{
         .message_id = .varnum,
         .data = .{ .length = .{ .prefix = .disabled, .max = 0x100000 } },
@@ -173,7 +173,7 @@ pub const LoginCookieResponsePacket = struct {
     key: []const u8,
     payload: ?[]const u8, // optional bytes
 
-    pub const Encoding = CraftTypes.Encoding(@This());
+    pub const Encoding = craft_io.Encoding(@This());
     pub const ENCODING: Encoding = .{
         .key = .{ .length = .{ .max = 0x7FFF } },
         .payload = .{ .length = .{ .max = 0x1400 } },
@@ -185,7 +185,7 @@ test "encoding numeric tagged union" {
         player_name: []const u8,
         player_id: UUID,
 
-        pub const Encoding = CraftTypes.Encoding(@This());
+        pub const Encoding = craft_io.Encoding(@This());
         pub const ENCODING: Encoding = .{
             .player_name = .{ .length = .{ .max = 12 } },
         };
@@ -198,7 +198,7 @@ test "encoding numeric tagged union" {
         remove: PlayerTarget,
         clear,
 
-        const Encoding = CraftTypes.Encoding(@This());
+        const Encoding = craft_io.Encoding(@This());
         pub const ENCODING: Encoding = .{ .tag = .varnum };
     };
 
@@ -232,12 +232,12 @@ test "encoding numeric tagged union" {
 
     var buf = std.ArrayList(u8).init(allocator);
 
-    const sb_pkt_encoding: CraftTypes.Encoding(ScoreboardPacket) = .{};
-    _ = try CraftTypes.encode(sb_pkt, buf.writer(), .{});
+    const sb_pkt_encoding: craft_io.Encoding(ScoreboardPacket) = .{};
+    _ = try craft_io.encode(sb_pkt, buf.writer(), .{});
     std.debug.print("\nin: {any}\nencoding: {any}\nout:{any}\n", .{ sb_pkt, sb_pkt_encoding, buf.items });
 
     var stream = std.io.fixedBufferStream(buf.items);
-    const sb_pkt_decoded = (try CraftTypes.decode(
+    const sb_pkt_decoded = (try craft_io.decode(
         ScoreboardPacket,
         stream.reader(),
         allocator,

@@ -1,5 +1,4 @@
 const std = @import("std");
-const CraftTypes = @import("CraftTypes.zig");
 
 const UUID = @This();
 
@@ -193,7 +192,7 @@ test "encode uuid" {
     defer buf.deinit();
 
     const id0 = UUID.random(std.crypto.random);
-    const bytes = try CraftTypes.encode(id0, buf.writer(), {});
+    const bytes = try @import("io.zig").encode(id0, buf.writer(), {});
     try std.testing.expectEqual(UUID.NUM_BYTES, bytes);
     try std.testing.expectEqualStrings(&id0.raw, buf.items);
 }
