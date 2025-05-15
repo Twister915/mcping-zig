@@ -634,7 +634,7 @@ fn decodeInt(
     switch (encoding) {
         .default => {
             const NUM_BITS = @bitSizeOf(Int);
-            const BYTES = std.math.divExact(usize, NUM_BITS, 8) catch @compileError(@typeName(Int) ++ " is not byte sized (divisible by 8), cannot encode");
+            const BYTES = comptime std.math.divExact(usize, NUM_BITS, 8) catch @compileError(@typeName(Int) ++ " is not byte sized (divisible by 8), cannot encode");
 
             const decoded: Int = try reader.readInt(Int, .big);
             return .{ .bytes_read = BYTES, .value = decoded };

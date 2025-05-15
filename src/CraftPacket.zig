@@ -181,10 +181,6 @@ pub const LoginCookieResponsePacket = struct {
 };
 
 test "encoding numeric tagged union" {
-    comptime {
-        @setEvalBranchQuota(10000);
-    }
-
     const PlayerTarget = struct {
         player_name: []const u8,
         player_id: UUID,
