@@ -5,11 +5,17 @@ pub const MAX_PACKET_SIZE: usize = 0x1FFFFF;
 pub fn encode(
     data: anytype,
     writer: anytype,
+    allocator: std.mem.Allocator,
     comptime encoding: Encoding(@TypeOf(data)),
 ) !usize {
     const Data = @TypeOf(data);
     if (std.meta.hasFn(Data, "craftEncode")) {
-        return data.craftEncode(writer, encoding);
+        return data.craftEncode(writer, allocator, encoding);
+    }
+
+    const Enc: type = Encoding(Data);
+    if (Enc == JsonEncoding) {
+        return encodeJson(data, writer, allocator, encoding);
     }
 
     if (Data == u8) {
@@ -23,14 +29,14 @@ pub fn encode(
 
     return switch (@typeInfo(Data)) {
         .int => encodeInt(data, writer, encoding),
-        .bool => encode(@as(u8, if (data) 1 else 0), writer, {}),
+        .bool => encode(@as(u8, if (data) 1 else 0), writer, allocator, {}),
         .float => encodeFloat(data, writer),
-        .pointer => encodePointer(data, writer, encoding),
-        .@"struct" => encodeStruct(data, writer, encoding),
-        .array => encodeArray(data, writer, encoding),
-        .optional => encodeOptional(data, writer, encoding),
-        .@"enum" => encodeEnum(data, writer, encoding),
-        .@"union" => encodeUnion(data, writer, encoding),
+        .pointer => encodePointer(data, writer, allocator, encoding),
+        .@"struct" => encodeStruct(data, writer, allocator, encoding),
+        .array => encodeArray(data, writer, allocator, encoding),
+        .optional => encodeOptional(data, writer, allocator, encoding),
+        .@"enum" => encodeEnum(data, writer, allocator, encoding),
+        .@"union" => encodeUnion(data, writer, allocator, encoding),
         else => @compileError(@typeName(Data) ++ " cannot be craft encoded"),
     };
 }
@@ -43,6 +49,11 @@ pub fn decode(
 ) !Decoded(Data) {
     if (std.meta.hasFn(Data, "craftDecode")) {
         return Data.craftDecode(reader, allocator, encoding);
+    }
+
+    const Enc: type = Encoding(Data);
+    if (Enc == JsonEncoding) {
+        return decodeJson(Data, reader, allocator, encoding);
     }
 
     if (Data == u8) {
@@ -70,7 +81,11 @@ pub fn decode(
     };
 }
 
-pub fn length(data: anytype, comptime encoding: Encoding(@TypeOf(data))) !usize {
+pub fn length(
+    data: anytype,
+    allocator: std.mem.Allocator,
+    comptime encoding: Encoding(@TypeOf(data)),
+) !usize {
     const Data = @TypeOf(data);
     switch (@typeInfo(Data)) {
         .@"struct", .@"enum", .@"union" => {
@@ -82,7 +97,12 @@ pub fn length(data: anytype, comptime encoding: Encoding(@TypeOf(data))) !usize 
     }
 
     if (std.meta.hasFn(Data, "craftLength")) {
-        return Data.craftLength(data, encoding);
+        return Data.craftLength(data, allocator, encoding);
+    }
+
+    const Enc: type = Encoding(Data);
+    if (Enc == JsonEncoding) {
+        return lengthJson(Data, allocator, encoding);
     }
 
     if (Data == u8) {
@@ -96,12 +116,12 @@ pub fn length(data: anytype, comptime encoding: Encoding(@TypeOf(data))) !usize 
     return switch (@typeInfo(Data)) {
         .int => lengthInt(data, encoding),
         .bool, .float => @sizeOf(Data),
-        .pointer => lengthPointer(data, encoding),
-        .@"struct" => lengthStruct(data, encoding),
-        .array => lengthArray(data, encoding),
-        .optional => lengthOptional(data, encoding),
-        .@"enum" => lengthEnum(data, encoding),
-        .@"union" => lengthUnion(data, encoding),
+        .pointer => lengthPointer(data, allocator, encoding),
+        .@"struct" => lengthStruct(data, allocator, encoding),
+        .array => lengthArray(data, allocator, encoding),
+        .optional => lengthOptional(data, allocator, encoding),
+        .@"enum" => lengthEnum(data, allocator, encoding),
+        .@"union" => lengthUnion(data, allocator, encoding),
         else => @compileError(@typeName(Data) ++ " is not supported by craft encoding / decoding"),
     };
 }
@@ -112,6 +132,12 @@ pub const VAR_LONG_BYTES: usize = 10;
 pub const IntEncoding = enum {
     default,
     varnum,
+};
+
+pub const JsonEncoding = struct {
+    string_encoding: Encoding([]u8) = .{},
+    stringify_options: std.json.StringifyOptions = .{},
+    parse_options: std.json.ParseOptions = .{},
 };
 
 pub fn Encoding(comptime Payload: type) type {
@@ -403,11 +429,12 @@ fn encodeFloat(data: anytype, writer: anytype) !usize {
 fn encodeOptional(
     data: anytype,
     writer: anytype,
+    allocator: std.mem.Allocator,
     comptime encoding: Encoding(@TypeOf(data)),
 ) !usize {
-    return (try encode(data != null, writer, {})) +
+    return (try encode(data != null, writer, allocator, {})) +
         (if (data) |payload|
-            try encode(payload, writer, encoding)
+            try encode(payload, writer, allocator, encoding)
         else
             0);
 }
@@ -416,6 +443,7 @@ fn encodeOptional(
 fn encodeStruct(
     data: anytype,
     writer: anytype,
+    allocator: std.mem.Allocator,
     comptime encoding: Encoding(@TypeOf(data)),
 ) !usize {
     const Struct = @TypeOf(data);
@@ -424,7 +452,7 @@ fn encodeStruct(
     inline for (struct_info.fields) |struct_field| {
         const field_data = @field(data, struct_field.name);
         const field_encoding = @field(encoding, struct_field.name);
-        bytes += try encode(field_data, writer, field_encoding);
+        bytes += try encode(field_data, writer, allocator, field_encoding);
     }
     return bytes;
 }
@@ -432,6 +460,7 @@ fn encodeStruct(
 fn encodePointer(
     data: anytype,
     writer: anytype,
+    allocator: std.mem.Allocator,
     comptime encoding: Encoding(@TypeOf(data)),
 ) !usize {
     const P = @TypeOf(data);
@@ -444,11 +473,11 @@ fn encodePointer(
                     // *[N]T, can become []const T
                     const Elem: type = std.meta.Elem(ptr_info.child);
                     const ConstSlice: type = []const Elem;
-                    return encode(@as(ConstSlice, data), writer, encoding);
+                    return encode(@as(ConstSlice, data), writer, allocator, encoding);
                 },
                 else => {
                     // *T
-                    return encode(data.*, writer, encoding);
+                    return encode(data.*, writer, allocator, encoding);
                 },
             }
         },
@@ -479,7 +508,7 @@ fn encodePointer(
                 .enabled => |lp| {
                     const Counter = lp.Counter();
                     const counter: Counter = @as(Counter, @intCast(slice.len));
-                    bytes += try encode(counter, writer, lp.encoding);
+                    bytes += try encode(counter, writer, allocator, lp.encoding);
                 },
                 else => {},
             }
@@ -495,7 +524,7 @@ fn encodePointer(
             } else {
                 // and now with either []T or []const T, we can iterate over the items and encode
                 for (slice) |item| {
-                    bytes += try encode(item, writer, encoding.items);
+                    bytes += try encode(item, writer, allocator, encoding.items);
                 }
             }
 
@@ -509,6 +538,7 @@ fn encodePointer(
 fn encodeArray(
     data: anytype,
     writer: anytype,
+    allocator: std.mem.Allocator,
     comptime encoding: Encoding(@TypeOf(data)),
 ) !usize {
     const Array: type = @TypeOf(data);
@@ -518,7 +548,7 @@ fn encodeArray(
         .enabled => |lp| {
             const C: type = lp.Counter();
             const counter: C = @as(C, @intCast(array_info.len));
-            bytes += try encode(counter, writer, lp.encoding);
+            bytes += try encode(counter, writer, allocator, lp.encoding);
         },
         .disabled => {},
     }
@@ -591,24 +621,40 @@ fn getWireTag(data: anytype) WireTagFor(@TypeOf(data)) {
 fn encodeEnum(
     data: anytype,
     writer: anytype,
+    allocator: std.mem.Allocator,
     comptime encoding: Encoding(@TypeOf(data)),
 ) !usize {
-    return encode(getWireTag(data), writer, encoding);
+    return encode(getWireTag(data), writer, allocator, encoding);
 }
 
 fn encodeUnion(
     data: anytype,
     writer: anytype,
+    allocator: std.mem.Allocator,
     comptime encoding: Encoding(@TypeOf(data)),
 ) !usize {
     switch (data) {
         inline else => |d, tag| {
             var bytes: usize = 0;
-            bytes += try encode(tag, writer, encoding.tag);
-            bytes += try encode(d, writer, @field(encoding.fields, @tagName(tag)));
+            bytes += try encode(tag, writer, allocator, encoding.tag);
+            bytes += try encode(d, writer, allocator, @field(encoding.fields, @tagName(tag)));
             return bytes;
         },
     }
+}
+
+fn encodeJson(
+    data: anytype,
+    writer: anytype,
+    allocator: std.mem.Allocator,
+    comptime encoding: JsonEncoding,
+) !usize {
+    var buf = std.ArrayList(u8).init(allocator);
+    defer buf.deinit();
+
+    try std.json.stringify(data, encoding.stringify_options, buf.writer());
+
+    return encode(buf.items, writer, allocator, encoding.string_encoding);
 }
 
 pub fn Decoded(comptime T: type) type {
@@ -993,7 +1039,24 @@ fn decodeUnion(
     return error.InvalidEnumTag;
 }
 
-fn lengthInt(data: anytype, comptime encoding: IntEncoding) !usize {
+fn decodeJson(
+    comptime Data: type,
+    reader: anytype,
+    arena_allocator: *std.heap.ArenaAllocator,
+    comptime encoding: JsonEncoding,
+) !Decoded(Data) {
+    const str_decode = try decode([]u8, reader, arena_allocator, encoding.string_encoding);
+    const allocator = arena_allocator.allocator();
+    defer allocator.free(str_decode.value);
+    // we use leaky here because we are guranteed to be using an arena allocator
+    const parsed: Data = try std.json.parseFromSliceLeaky(Data, allocator, str_decode.value, encoding.parse_options);
+    return .{
+        .value = parsed,
+        .bytes_read = str_decode.bytes_read,
+    };
+}
+
+pub fn lengthInt(data: anytype, comptime encoding: IntEncoding) !usize {
     return switch (encoding) {
         .default => @sizeOf(@TypeOf(data)),
         .varnum => @max(1, try std.math.divCeil(
@@ -1004,7 +1067,11 @@ fn lengthInt(data: anytype, comptime encoding: IntEncoding) !usize {
     };
 }
 
-fn lengthPointer(data: anytype, comptime encoding: Encoding(@TypeOf(data))) !usize {
+fn lengthPointer(
+    data: anytype,
+    allocator: std.mem.Allocator,
+    comptime encoding: Encoding(@TypeOf(data)),
+) !usize {
     const Data = @TypeOf(data);
     const ptr_info = @typeInfo(Data).pointer;
     var bytes: usize = 0;
@@ -1028,7 +1095,7 @@ fn lengthPointer(data: anytype, comptime encoding: Encoding(@TypeOf(data))) !usi
                 .enabled => |lp| {
                     const Counter: type = lp.Counter();
                     const c: Counter = @intCast(count);
-                    bytes += try length(c, lp.encoding);
+                    bytes += try lengthInt(c, lp.encoding);
                 },
                 .disabled => {},
             }
@@ -1037,7 +1104,7 @@ fn lengthPointer(data: anytype, comptime encoding: Encoding(@TypeOf(data))) !usi
                 bytes += slice.len;
             } else {
                 for (slice) |item| {
-                    bytes += try length(item, encoding.items);
+                    bytes += try length(item, allocator, encoding.items);
                 }
             }
         },
@@ -1047,7 +1114,11 @@ fn lengthPointer(data: anytype, comptime encoding: Encoding(@TypeOf(data))) !usi
     return bytes;
 }
 
-fn lengthStruct(data: anytype, comptime encoding: Encoding(@TypeOf(data))) !usize {
+fn lengthStruct(
+    data: anytype,
+    allocator: std.mem.Allocator,
+    comptime encoding: Encoding(@TypeOf(data)),
+) !usize {
     const Data = @TypeOf(data);
     const struct_info = @typeInfo(Data).@"struct";
 
@@ -1055,7 +1126,7 @@ fn lengthStruct(data: anytype, comptime encoding: Encoding(@TypeOf(data))) !usiz
     inline for (struct_info.fields) |field| {
         const field_data = @field(data, field.name);
         const field_encoding = @field(encoding, field.name);
-        l += try length(field_data, field_encoding);
+        l += try length(field_data, allocator, field_encoding);
     }
 
     return l;
@@ -1063,6 +1134,7 @@ fn lengthStruct(data: anytype, comptime encoding: Encoding(@TypeOf(data))) !usiz
 
 fn lengthArray(
     data: anytype,
+    allocator: std.mem.Allocator,
     comptime encoding: Encoding(@TypeOf(data)),
 ) usize {
     const Array: type = @TypeOf(data);
@@ -1072,7 +1144,7 @@ fn lengthArray(
         .enabled => |lp| {
             const C = lp.Counter();
             const count = @as(C, @intCast(array_info.len));
-            bytes += try length(count, lp.encoding);
+            bytes += try lengthInt(count, lp.encoding);
         },
         .disabled => {},
     }
@@ -1083,7 +1155,7 @@ fn lengthArray(
     } else {
         const items_encoding = encoding.items;
         inline for (data) |item| {
-            bytes += try length(item, items_encoding);
+            bytes += try length(item, allocator, items_encoding);
         }
     }
 
@@ -1092,22 +1164,39 @@ fn lengthArray(
 
 fn lengthOptional(
     data: anytype,
+    allocator: std.mem.Allocator,
     comptime encoding: Encoding(@TypeOf(data)),
 ) !usize {
-    return (if (data) |d| try length(d, encoding) else 0) + 1;
+    return (if (data) |d| try length(d, allocator, encoding) else 0) + 1;
 }
 
-fn lengthEnum(data: anytype, comptime encoding: Encoding(@TypeOf(data))) !usize {
-    return length(getWireTag(data), encoding);
+fn lengthEnum(
+    data: anytype,
+    allocator: std.mem.Allocator,
+    comptime encoding: Encoding(@TypeOf(data)),
+) !usize {
+    return length(getWireTag(data), allocator, encoding);
 }
 
-fn lengthUnion(data: anytype, comptime encoding: Encoding(@TypeOf(data))) !usize {
+fn lengthUnion(
+    data: anytype,
+    allocator: std.mem.Allocator,
+    comptime encoding: Encoding(@TypeOf(data)),
+) !usize {
     switch (data) {
         inline else => |body, tag| {
-            const tag_bytes = try length(tag, encoding.tag);
+            const tag_bytes = try length(tag, allocator, encoding.tag);
             const field_encoding = @field(encoding.fields, @tagName(tag));
-            const field_bytes = try length(body, field_encoding);
+            const field_bytes = try length(body, allocator, field_encoding);
             return tag_bytes + field_bytes;
         },
     }
+}
+
+fn lengthJson(
+    data: anytype,
+    allocator: std.mem.Allocator,
+    comptime encoding: JsonEncoding,
+) !usize {
+    return try encodeJson(data, std.io.null_writer, allocator, encoding);
 }

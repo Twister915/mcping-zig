@@ -75,7 +75,7 @@ fn pingPrint(allocator: std.mem.Allocator, target: Target) !void {
     defer arena_allocator.deinit();
 
     const response = try ping(target, &arena_allocator);
-    std.debug.print("{?d}ms {s}\n", .{
+    std.debug.print("{?d}ms {any}\n", .{
         response.latency_ms,
         response.status,
     });
@@ -93,7 +93,7 @@ const Profile = struct {
 };
 
 const PingResponse = struct {
-    status: []const u8,
+    status: packets.Status,
     latency_ms: ?i64 = null,
 };
 

@@ -146,7 +146,7 @@ pub fn writePacket(conn: *Conn, id: i32, packet: anytype) !usize {
 
     conn.clearBuffers();
 
-    const body_and_id_length = try packetLength(id, packet);
+    const body_and_id_length = try packetLength(id, packet, conn.allocator);
     switch (conn.compression) {
         .enabled => |*comp| {
             // [length]
@@ -157,27 +157,27 @@ pub fn writePacket(conn: *Conn, id: i32, packet: anytype) !usize {
                 // write the compressed data to comp.buf
                 var compressor = try std.compress.zlib.compressor(comp.buf.writer(), .{});
                 const compressor_writer = compressor.writer();
-                _ = try craft_io.encode(id, compressor_writer, .varnum);
-                _ = try craft_io.encode(packet, compressor_writer, encoding);
+                _ = try craft_io.encode(id, compressor_writer, conn.allocator, .varnum);
+                _ = try craft_io.encode(packet, compressor_writer, conn.allocator, encoding);
                 try compressor.finish();
 
                 // write the packet we actually intend to send
-                const actual_size: usize = (try craft_io.length(data_length, .varnum)) + comp.buf.items.len;
+                const actual_size: usize = (try craft_io.length(data_length, conn.allocator, .varnum)) + comp.buf.items.len;
                 const conn_buf_writer = conn.buf.writer();
-                _ = try craft_io.encode(@as(i32, @intCast(actual_size)), conn_buf_writer, .varnum);
-                _ = try craft_io.encode(data_length, conn_buf_writer, .varnum);
+                _ = try craft_io.encode(@as(i32, @intCast(actual_size)), conn_buf_writer, conn.allocator, .varnum);
+                _ = try craft_io.encode(data_length, conn_buf_writer, conn.allocator, .varnum);
                 try conn.buf.appendSlice(comp.buf.items);
             } else {
-                _ = try craft_io.encode(@as(i32, @intCast(body_and_id_length + 1)), conn.buf.writer(), .varnum);
+                _ = try craft_io.encode(@as(i32, @intCast(body_and_id_length + 1)), conn.buf.writer(), conn.allocator, .varnum);
                 try conn.buf.append(0); // data length == 0
-                _ = try craft_io.encode(id, conn.buf.writer(), .varnum);
-                _ = try craft_io.encode(packet, conn.buf.writer(), encoding);
+                _ = try craft_io.encode(id, conn.buf.writer(), conn.allocator, .varnum);
+                _ = try craft_io.encode(packet, conn.buf.writer(), conn.allocator, encoding);
             }
         },
         .disabled => {
-            _ = try craft_io.encode(@as(i32, @intCast(body_and_id_length)), conn.buf.writer(), .varnum);
-            _ = try craft_io.encode(id, conn.buf.writer(), .varnum);
-            _ = try craft_io.encode(packet, conn.buf.writer(), encoding);
+            _ = try craft_io.encode(@as(i32, @intCast(body_and_id_length)), conn.buf.writer(), conn.allocator, .varnum);
+            _ = try craft_io.encode(id, conn.buf.writer(), conn.allocator, .varnum);
+            _ = try craft_io.encode(packet, conn.buf.writer(), conn.allocator, encoding);
         },
     }
 
@@ -186,9 +186,11 @@ pub fn writePacket(conn: *Conn, id: i32, packet: anytype) !usize {
     return bytes_to_send.len;
 }
 
-pub fn packetLength(id: i32, packet: anytype) !usize {
+pub fn packetLength(id: i32, packet: anytype, allocator: std.mem.Allocator) !usize {
     const packet_encoding = comptime defaultPacketEncoding(@TypeOf(packet));
-    return (try craft_io.length(id, .varnum)) + (try craft_io.length(packet, packet_encoding));
+    const id_len = try craft_io.lengthInt(id, .varnum);
+    const payload_len = try craft_io.length(packet, allocator, packet_encoding);
+    return id_len + payload_len;
 }
 
 pub fn setCompressionThreshold(conn: *Conn, threshold: usize) !void {
