@@ -760,7 +760,7 @@ fn decodePointer(
                         bytes += count;
                     } else {
                         for (dst) |*item| {
-                            item.* = (try decode(Payload, reader, allocator, encoding.items)).unwrap(&bytes);
+                            item.* = (try decode(Payload, reader, arena_allocator, encoding.items)).unwrap(&bytes);
                         }
                     }
                 },

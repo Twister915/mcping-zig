@@ -240,7 +240,7 @@ test "encoding numeric tagged union" {
     const sb_pkt_decoded = (try craft_io.decode(
         ScoreboardPacket,
         stream.reader(),
-        allocator,
+        &arena,
         sb_pkt_encoding,
     )).unwrap(null);
     std.debug.print("\ndecoded: {any}\n", .{sb_pkt_decoded});
