@@ -145,6 +145,15 @@ pub fn Encoding(comptime Payload: type) type {
         return void;
     }
 
+    switch (@typeInfo(Payload)) {
+        .@"struct", .@"union", .@"enum" => {
+            if (@hasDecl(Payload, "CraftEncoding")) {
+                return Payload.CraftEncoding;
+            }
+        },
+        else => {},
+    }
+
     return switch (@typeInfo(Payload)) {
         .int => IntEncoding,
         .bool, .void, .float => void,
@@ -183,10 +192,6 @@ pub fn defaultEncoding(comptime Payload: type) Encoding(Payload) {
 }
 
 fn StructEncoding(comptime Struct: type) type {
-    if (@hasDecl(Struct, "CraftEncoding")) {
-        return Struct.CraftEncoding;
-    }
-
     const struct_info = @typeInfo(Struct).@"struct";
 
     comptime var encoding_fields: [struct_info.fields.len]std.builtin.Type.StructField = undefined;
