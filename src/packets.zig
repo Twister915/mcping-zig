@@ -43,7 +43,10 @@ pub const StatusResponsePacket = struct {
 
     const Encoding = craft_io.Encoding(@This());
     pub const ENCODING: Encoding = .{
-        .status = .{ .string_encoding = .{ .length = .{ .max = 0x7FFF } } },
+        .status = .{
+            .string_encoding = .{ .length = .{ .max = 0x7FFF } },
+            .parse_options = .{ .ignore_unknown_fields = true },
+        },
     };
 };
 

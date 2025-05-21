@@ -10,6 +10,21 @@ pub fn fromStr(repr: []const u8) !UUID {
     return .{ .raw = try Parser.parse(repr) };
 }
 
+pub fn jsonParse(
+    allocator: std.mem.Allocator,
+    source: anytype,
+    options: std.json.ParseOptions,
+) !UUID {
+    const str_parsed = try std.json.innerParse([]const u8, allocator, source, options);
+    return fromStr(str_parsed) catch {
+        return error.UnexpectedToken;
+    };
+}
+
+pub fn jsonStringify(self: UUID, jw: anytype) !void {
+    try jw.print("{s}", .{self});
+}
+
 pub fn random(rng: anytype) UUID {
     var out: UUID = undefined;
     rng.bytes(&out.raw);
