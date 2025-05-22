@@ -457,7 +457,7 @@ const TraditionalParser = struct {
         const SECTION_SYMBOL = "§";
         const SECTION_SYMBOL_SIZE = SECTION_SYMBOL.len;
 
-        while (std.mem.indexOf(u8, self.text, SECTION_SYMBOL) == 0) {
+        while (hasPrefix(u8, self.text, SECTION_SYMBOL)) {
             if (self.text.len > SECTION_SYMBOL_SIZE) {
                 switch (self.text[SECTION_SYMBOL_SIZE]) {
                     '0' => self.applyColor(.black),
@@ -711,4 +711,8 @@ fn BashWriter(comptime W: type) type {
             }
         }
     };
+}
+
+fn hasPrefix(comptime T: type, haystack: []const T, prefix: []const T) bool {
+    return haystack.len >= prefix.len and std.mem.eql(T, haystack[0..prefix.len], prefix);
 }
