@@ -26,6 +26,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const zigimg_dependency = b.dependency("zigimg", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    exe_mod.addImport("zigimg", zigimg_dependency.module("zigimg"));
+
     // This creates another `std.Build.Step.Compile`, but this one builds an executable
     // rather than a static library.
     const exe = b.addExecutable(.{

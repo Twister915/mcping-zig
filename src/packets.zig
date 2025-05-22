@@ -86,7 +86,7 @@ pub const Favicon = struct {
             try base64_decoder.decode(dest, raw.image_base64);
             return .{
                 .mime_type = raw.mime_type,
-                .image_bytes = dest,
+                .image = dest,
             };
         }
 
