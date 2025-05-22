@@ -1049,7 +1049,8 @@ fn decodeJson(
 ) !Decoded(Data) {
     const str_decode = try decode([]u8, reader, arena_allocator, encoding.string_encoding);
     const allocator = arena_allocator.allocator();
-    defer allocator.free(str_decode.value);
+    // we don't deallocate str_decode because json parser might point to the memory allocated for the string
+
     // we use leaky here because we are guranteed to be using an arena allocator
     const parsed: Data = std.json.parseFromSliceLeaky(Data, allocator, str_decode.value, encoding.parse_options) catch |err| {
         std.debug.print("failed to parse JSON: {s}\n", .{str_decode.value});

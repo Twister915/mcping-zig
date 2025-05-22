@@ -1,10 +1,13 @@
 const std = @import("std");
 const craft_io = @import("io.zig");
 const UUID = @import("UUID.zig");
+const util = @import("util.zig");
 
 // raw data-type definitions
 pub const Component = struct {
-    content: Content,
+    // TODO use the Content struct once I figure out better JSON parsing... I can't really use union(enum) yet
+    // content: Content,
+    text: ?[]const u8 = null,
     color: ?Color = null,
     font: ?[]const u8 = null,
     bold: ?bool = null,
@@ -13,14 +16,17 @@ pub const Component = struct {
     strikethrough: ?bool = null,
     obfuscated: ?bool = null,
     // TODO shadow_color
-    insertion: ?[]const u8 = null,
-    click_event: ?ClickEvent = null,
-    hover_event: ?HoverEvent = null,
+    // TODO fix interactivity (these use enums discriminated on "type" which is hard to parse)
+    // insertion: ?[]const u8 = null,
+    // click_event: ?ClickEvent = null,
+    // hover_event: ?HoverEvent = null,
     extra: ?[]const Component = null,
+
+    pub const EMPTY: Component = .{ .text = "" };
 
     pub const CraftEncoding: type = craft_io.JsonEncoding;
 
-    const ComponentObj = @Type(.{ .@"struct" = .{
+    const ComponentBase = @Type(.{ .@"struct" = .{
         .layout = .auto,
         .fields = @typeInfo(Component).@"struct".fields,
         .decls = &.{},
@@ -35,27 +41,21 @@ pub const Component = struct {
         const tt = try source.peekNextTokenType();
         switch (tt) {
             .object_begin => {
-                // TODO this still doesn't work because we expect "content" but actually each of the
-                // content types are flattened onto the component
-                return Component.fromObj(try std.json.innerParse(
-                    ComponentObj,
+                return fromBase(try std.json.innerParse(
+                    ComponentBase,
                     allocator,
                     source,
                     options,
                 ));
             },
             .string => {
-                return switch (try source.nextAllocMax(
+                const s = try std.json.innerParse(
+                    []const u8,
                     allocator,
-                    .alloc_always,
-                    options.max_value_len.?,
-                )) {
-                    inline .string, .allocated_string => |s| .{ .content = .{ .text = s } },
-                    else => {
-                        std.debug.print("error processing JSON from status, got token {any}\n", .{tt});
-                        return error.UnexpectedToken;
-                    },
-                };
+                    source,
+                    options,
+                );
+                return .{ .text = s };
             },
             else => {
                 std.debug.print("error processing JSON from status, got token {any}\n", .{tt});
@@ -64,7 +64,7 @@ pub const Component = struct {
         }
     }
 
-    fn fromObj(inner: ComponentObj) Component {
+    fn fromBase(inner: ComponentBase) Component {
         var out: Component = undefined;
         inline for (@typeInfo(@This()).@"struct".fields) |field| {
             @field(out, field.name) = @field(inner, field.name);
@@ -165,7 +165,7 @@ pub const ScoreContent = struct {
 
 pub const SelectorContent = struct {
     selector: []const u8,
-    separator: *const Component = &.{ .content = .{ .text = "" } },
+    separator: *const Component = &Component.EMPTY,
 };
 
 pub const KeybindContent = struct { keybind: []const u8 };
@@ -237,9 +237,9 @@ pub const Formatting = struct {
 };
 
 pub const Interactivity = struct {
-    insertion: ?[]const u8 = null,
-    click_event: ?ClickEvent = null,
-    hover_event: ?HoverEvent = null,
+    // insertion: ?[]const u8 = null,
+    // click_event: ?ClickEvent = null,
+    // hover_event: ?HoverEvent = null,
 
     pub fn isEmpty(self: Interactivity) bool {
         return areAllFieldsDefault(self);
@@ -314,13 +314,10 @@ pub const TextIter = struct {
                     }
 
                     if (frame.traditional == null) {
-                        switch (frame.node.content) {
-                            .text => |text| {
-                                if (text.len > 0) {
-                                    return self.textNode(text);
-                                }
-                            },
-                            else => {},
+                        if (frame.node.text) |text| {
+                            if (text.len > 0) {
+                                return self.textNode(text);
+                            }
                         }
                     }
                 },
@@ -370,13 +367,10 @@ pub const TextIter = struct {
     fn childFrameWithNode(self: *Self, node: Component, allow_translate_traditional: bool) !void {
         var next_frame: Frame = .{ .node = node };
         if (self.options.translate_traditional) {
-            switch (node.content) {
-                .text => |txt| {
-                    if (allow_translate_traditional and !self.hasAnyFormattingOrInteractivity()) {
-                        next_frame.traditional = .{ .text = txt };
-                    }
-                },
-                else => {},
+            if (node.text) |txt| {
+                if (allow_translate_traditional and !self.hasAnyFormattingOrInteractivity()) {
+                    next_frame.traditional = .{ .text = txt };
+                }
             }
         }
 
@@ -433,7 +427,7 @@ pub fn parseTraditional(traditional: []const u8, allocator: std.mem.Allocator) !
 
     const components = try extras.toOwnedSlice();
     const root_component: Component = .{
-        .content = .{ .text = "" },
+        .text = "",
         .extra = components,
     };
     return .{
@@ -457,7 +451,7 @@ const TraditionalParser = struct {
         const SECTION_SYMBOL = "§";
         const SECTION_SYMBOL_SIZE = SECTION_SYMBOL.len;
 
-        while (hasPrefix(u8, self.text, SECTION_SYMBOL)) {
+        while (util.hasPrefix(u8, self.text, SECTION_SYMBOL)) {
             if (self.text.len > SECTION_SYMBOL_SIZE) {
                 switch (self.text[SECTION_SYMBOL_SIZE]) {
                     '0' => self.applyColor(.black),
@@ -516,9 +510,7 @@ const TraditionalParser = struct {
         const text_to_emit = self.text[0..size];
         self.consume(size);
         return .{
-            .content = .{
-                .text = text_to_emit,
-            },
+            .text = text_to_emit,
             .color = self.formatting.color,
             .bold = self.formatting.bold,
             .italic = self.formatting.italic,
@@ -538,7 +530,7 @@ test "traditional parser" {
     var parser: TraditionalParser = .{ .text = example };
     const expected: [2]Component = .{
         .{
-            .content = .{ .text = "Hypixel Network " },
+            .text = "Hypixel Network ",
             .color = .{ .builtin = .green },
             .bold = false,
             .italic = false,
@@ -547,7 +539,7 @@ test "traditional parser" {
             .obfuscated = false,
         },
         .{
-            .content = .{ .text = "[1.8-1.21]" },
+            .text = "[1.8-1.21]",
             .color = .{ .builtin = .red },
             .bold = false,
             .italic = false,
@@ -711,8 +703,4 @@ fn BashWriter(comptime W: type) type {
             }
         }
     };
-}
-
-fn hasPrefix(comptime T: type, haystack: []const T, prefix: []const T) bool {
-    return haystack.len >= prefix.len and std.mem.eql(T, haystack[0..prefix.len], prefix);
 }

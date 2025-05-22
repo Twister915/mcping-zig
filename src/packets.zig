@@ -2,6 +2,7 @@ const std = @import("std");
 const craft_io = @import("io.zig");
 const chat = @import("chat.zig");
 const UUID = @import("UUID.zig");
+const util = @import("util.zig");
 
 // state = handshake
 pub const HandshakingPacket = struct {
@@ -63,11 +64,61 @@ pub const Status = struct {
             id: UUID,
         } = null,
     },
-    description: chat.Component,
-    favicon: ?[]const u8 = null, // todo better type
+    description: chat.Component = chat.Component.EMPTY,
+    favicon: ?Favicon.Raw = null,
     enforces_secure_chat: ?bool = null,
 
     pub const CraftEncoding: type = craft_io.JsonEncoding;
+};
+
+pub const Favicon = struct {
+    mime_type: []const u8,
+    image: []const u8,
+
+    const Raw = struct {
+        mime_type: []const u8,
+        image_base64: []const u8,
+
+        const base64_decoder = std.base64.standard.Decoder;
+        pub fn decode(raw: Raw, allocator: std.mem.Allocator) !Favicon {
+            const size = try base64_decoder.calcSizeForSlice(raw.image_base64);
+            const dest = try allocator.alloc(u8, size);
+            try base64_decoder.decode(dest, raw.image_base64);
+            return .{
+                .mime_type = raw.mime_type,
+                .image_bytes = dest,
+            };
+        }
+
+        pub fn jsonParse(
+            allocator: std.mem.Allocator,
+            source: anytype,
+            options: std.json.ParseOptions,
+        ) !Raw {
+            return fromRawStr(try std.json.innerParse(
+                []const u8,
+                allocator,
+                source,
+                options,
+            ));
+        }
+
+        fn fromRawStr(str: []const u8) Raw {
+            var rest = str;
+            _ = util.stripPrefix(u8, &rest, "data:");
+            var mime_type: []const u8 = "";
+            if (std.mem.indexOfScalar(u8, rest, ';')) |semicolon_at| {
+                mime_type = rest[0..semicolon_at];
+                rest = rest[semicolon_at + 1 ..];
+            }
+
+            _ = util.stripPrefix(u8, &rest, "base64,");
+            return .{
+                .mime_type = mime_type,
+                .image_base64 = rest,
+            };
+        }
+    };
 };
 
 pub const StatusPingPongPacket = struct {
