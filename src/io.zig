@@ -126,9 +126,6 @@ pub fn length(
     };
 }
 
-pub const VAR_INT_BYTES: usize = 5;
-pub const VAR_LONG_BYTES: usize = 10;
-
 pub const IntEncoding = enum {
     default,
     varnum,

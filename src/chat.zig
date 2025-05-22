@@ -298,32 +298,33 @@ pub const TextIter = struct {
 
     fn next(self: *Self) !?TextNode {
         state_loop: while (self.currentFrame()) |frame| {
-            if (frame.traditional) |*traditional| {
-                if (traditional.next()) |parsed_next| {
-                    try self.childFrameWithNode(parsed_next, false);
-                    continue :state_loop;
-                } else {
-                    _ = self.frames.pop();
-                    continue :state_loop;
-                }
-            }
-
             switch (frame.state) {
                 .root => {
-                    switch (frame.node.content) {
-                        .text => |text| {
-                            if (frame.node.extra != null and frame.node.extra.?.len > 0) {
-                                frame.state = .{ .extra_node = 0 };
-                            } else {
-                                frame.state = .finished;
-                            }
-                            if (text.len > 0) {
-                                return self.textNode(text);
-                            }
-                        },
-                        else => {},
+                    if (frame.traditional) |*traditional| {
+                        if (traditional.next()) |parsed_next| {
+                            try self.childFrameWithNode(parsed_next, false);
+                            continue :state_loop;
+                        }
+                    }
+
+                    if (frame.node.extra != null and frame.node.extra.?.len > 0) {
+                        frame.state = .{ .extra_node = 0 };
+                    } else {
+                        frame.state = .finished;
+                    }
+
+                    if (frame.traditional == null) {
+                        switch (frame.node.content) {
+                            .text => |text| {
+                                if (text.len > 0) {
+                                    return self.textNode(text);
+                                }
+                            },
+                            else => {},
+                        }
                     }
                 },
+
                 .extra_node => |extra_idx| {
                     if (frame.node.extra) |extra| {
                         if (extra.len > extra_idx) {
@@ -338,6 +339,7 @@ pub const TextIter = struct {
 
                     frame.state = .finished;
                 },
+
                 .finished => {
                     _ = self.frames.pop();
                 },
@@ -568,7 +570,12 @@ pub const BashWriteOptions = struct {
     no_style: bool = false,
 };
 
-pub fn writeBash(component: Component, text_options: TextIterOptions, bash_options: BashWriteOptions, target: anytype) !void {
+pub fn writeBash(
+    component: Component,
+    text_options: TextIterOptions,
+    bash_options: BashWriteOptions,
+    target: anytype,
+) !void {
     const Writer = BashWriter(@TypeOf(target));
     var writer = Writer.init(component, text_options, bash_options, target);
     try writer.flush();
@@ -587,7 +594,12 @@ fn BashWriter(comptime W: type) type {
 
         const Self = @This();
 
-        pub fn init(component: Component, text_options: TextIterOptions, bash_options: BashWriteOptions, target: W) Self {
+        pub fn init(
+            component: Component,
+            text_options: TextIterOptions,
+            bash_options: BashWriteOptions,
+            target: W,
+        ) Self {
             return .{
                 .target = target,
                 .text_iter = TextIter.init(component, text_options),
@@ -664,24 +676,24 @@ fn BashWriter(comptime W: type) type {
         fn writeColor(self: *Self) !void {
             if (self.formatting.color) |color| {
                 switch (color) {
-                    .builtin => |bc| switch (bc) {
-                        .black => try self.writeControl("30"),
-                        .dark_blue => try self.writeControl("34"),
-                        .dark_green => try self.writeControl("32"),
-                        .dark_aqua => try self.writeControl("36"),
-                        .dark_red => try self.writeControl("31"),
-                        .dark_purple => try self.writeControl("35"),
-                        .gold => try self.writeControl("33"),
-                        .gray => try self.writeControl("37"),
-                        .dark_gray => try self.writeControl("90"),
-                        .blue => try self.writeControl("94"),
-                        .green => try self.writeControl("92"),
-                        .aqua => try self.writeControl("96"),
-                        .red => try self.writeControl("91"),
-                        .light_purple => try self.writeControl("95"),
-                        .yellow => try self.writeControl("93"),
-                        .white => try self.writeControl("97"),
-                    },
+                    .builtin => |bc| try self.writeControl(switch (bc) {
+                        .black => "30",
+                        .dark_blue => "34",
+                        .dark_green => "32",
+                        .dark_aqua => "36",
+                        .dark_red => "31",
+                        .dark_purple => "35",
+                        .gold => "33",
+                        .gray => "37",
+                        .dark_gray => "90",
+                        .blue => "94",
+                        .green => "92",
+                        .aqua => "96",
+                        .red => "91",
+                        .light_purple => "95",
+                        .yellow => "93",
+                        .white => "97",
+                    }),
                     .hex => return,
                 }
             } else {
