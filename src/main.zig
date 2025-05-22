@@ -3,6 +3,7 @@ const CraftConn = @import("CraftConn.zig");
 const packets = @import("packets.zig");
 const UUID = @import("UUID.zig");
 const craft_chat = @import("chat.zig");
+const draw = @import("draw.zig");
 
 pub const std_options: std.Options = .{
     .log_level = .debug,
@@ -29,7 +30,7 @@ pub fn main() !void {
     if (!any) {
         // this is a hack for debugging from within vscode
         if (std.debug.runtime_safety) {
-            handleTarget(allocator, "rpi4.jhome");
+            handleTarget(allocator, "us.hypixel.net");
         } else {
             std.debug.print("error: must specify at least one target host\n", .{});
         }
@@ -70,19 +71,36 @@ fn targetFromArg(raw: []const u8) !Target {
     return target;
 }
 
-fn pingPrint(allocator: std.mem.Allocator, target: Target) !void {
-    var arena_allocator = std.heap.ArenaAllocator.init(allocator);
+fn pingPrint(parent_allocator: std.mem.Allocator, target: Target) !void {
+    var arena_allocator = std.heap.ArenaAllocator.init(parent_allocator);
     defer arena_allocator.deinit();
 
+    const allocator = arena_allocator.allocator();
+
     const response = try ping(target, &arena_allocator);
-    var bash_str_buf = std.ArrayList(u8).init(arena_allocator.allocator());
+
+    var bash_str_buf = std.ArrayList(u8).init(allocator);
     try craft_chat.writeBash(
         response.status.description,
         .{ .translate_traditional = true },
         .{},
         bash_str_buf.writer(),
     );
+
     std.debug.print("{s}\n", .{bash_str_buf.items});
+
+    if (response.status.favicon) |favicon_raw| {
+        const favicon_decoded = try favicon_raw.decode(allocator);
+        const favicon_printer = try draw.FaviconPrinter.init(
+            favicon_decoded,
+            .{},
+            arena_allocator.allocator(),
+        );
+
+        var favicon_printed_buf = std.ArrayList(u8).init(allocator);
+        try favicon_printer.draw(favicon_printed_buf.writer());
+        std.debug.print("{s}\n", .{favicon_printed_buf.items});
+    }
 }
 
 const Target = struct {
