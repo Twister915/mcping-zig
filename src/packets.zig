@@ -1,6 +1,8 @@
 const std = @import("std");
 const craft_io = @import("io.zig");
+const chat = @import("chat.zig");
 const UUID = @import("UUID.zig");
+const util = @import("util.zig");
 
 // state = handshake
 pub const HandshakingPacket = struct {
@@ -32,16 +34,91 @@ test "encode handshaking packet" {
     var buf = std.ArrayList(u8).init(std.testing.allocator);
     defer buf.deinit();
 
-    _ = try craft_io.encode(pkt, buf.writer(), HandshakingPacket);
+    _ = try craft_io.encode(pkt, std.testing.allocator, buf.writer(), HandshakingPacket);
     std.debug.print("\nin: {any}\nencoding: {any}\nout:{any}\n", .{ pkt, HandshakingPacket.ENCODING, buf.items });
 }
 
 // state = status
 pub const StatusResponsePacket = struct {
-    status: []const u8,
+    status: Status,
 
     const Encoding = craft_io.Encoding(@This());
-    pub const ENCODING: Encoding = .{ .status = .{ .length = .{ .max = 0x7FFF } } };
+    pub const ENCODING: Encoding = .{
+        .status = .{
+            .string_encoding = .{ .length = .{ .max = 0x7FFF } },
+            .parse_options = .{ .ignore_unknown_fields = true },
+        },
+    };
+};
+
+pub const Status = struct {
+    version: struct {
+        name: []const u8,
+        protocol: i32,
+    },
+    players: struct {
+        max: i32,
+        online: i32,
+        sample: ?[]const struct {
+            name: []const u8,
+            id: UUID,
+        } = null,
+    },
+    description: chat.Component = chat.Component.EMPTY,
+    favicon: ?Favicon.Raw = null,
+    enforces_secure_chat: ?bool = null,
+
+    pub const CraftEncoding: type = craft_io.JsonEncoding;
+};
+
+pub const Favicon = struct {
+    mime_type: []const u8,
+    image: []const u8,
+
+    const Raw = struct {
+        mime_type: []const u8,
+        image_base64: []const u8,
+
+        const base64_decoder = std.base64.standard.Decoder;
+        pub fn decode(raw: Raw, allocator: std.mem.Allocator) !Favicon {
+            const size = try base64_decoder.calcSizeForSlice(raw.image_base64);
+            const dest = try allocator.alloc(u8, size);
+            try base64_decoder.decode(dest, raw.image_base64);
+            return .{
+                .mime_type = raw.mime_type,
+                .image_bytes = dest,
+            };
+        }
+
+        pub fn jsonParse(
+            allocator: std.mem.Allocator,
+            source: anytype,
+            options: std.json.ParseOptions,
+        ) !Raw {
+            return fromRawStr(try std.json.innerParse(
+                []const u8,
+                allocator,
+                source,
+                options,
+            ));
+        }
+
+        fn fromRawStr(str: []const u8) Raw {
+            var rest = str;
+            _ = util.stripPrefix(u8, &rest, "data:");
+            var mime_type: []const u8 = "";
+            if (std.mem.indexOfScalar(u8, rest, ';')) |semicolon_at| {
+                mime_type = rest[0..semicolon_at];
+                rest = rest[semicolon_at + 1 ..];
+            }
+
+            _ = util.stripPrefix(u8, &rest, "base64,");
+            return .{
+                .mime_type = mime_type,
+                .image_base64 = rest,
+            };
+        }
+    };
 };
 
 pub const StatusPingPongPacket = struct {
@@ -107,14 +184,14 @@ test "encode login success packet" {
     defer buf.deinit();
 
     const login_success_encoding: craft_io.Encoding(LoginSuccessPacket) = .{};
-    _ = try craft_io.encode(pkt, buf.writer(), login_success_encoding);
+    _ = try craft_io.encode(pkt, buf.writer(), std.testing.allocator, login_success_encoding);
     std.debug.print(
         "\nin: {any}\nencoding: {any}\nout:{any}\nlength(pkt): pred={d}, act={d}\n",
         .{
             pkt,
             login_success_encoding,
             buf.items,
-            try craft_io.length(pkt, login_success_encoding),
+            try craft_io.length(pkt, std.testing.allocator, login_success_encoding),
             buf.items.len,
         },
     );
@@ -233,7 +310,7 @@ test "encoding numeric tagged union" {
     var buf = std.ArrayList(u8).init(allocator);
 
     const sb_pkt_encoding: craft_io.Encoding(ScoreboardPacket) = .{};
-    _ = try craft_io.encode(sb_pkt, buf.writer(), .{});
+    _ = try craft_io.encode(sb_pkt, allocator, buf.writer(), .{});
     std.debug.print("\nin: {any}\nencoding: {any}\nout:{any}\n", .{ sb_pkt, sb_pkt_encoding, buf.items });
 
     var stream = std.io.fixedBufferStream(buf.items);

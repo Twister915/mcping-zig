@@ -2,13 +2,13 @@ const std = @import("std");
 const CraftConn = @import("CraftConn.zig");
 const packets = @import("packets.zig");
 const UUID = @import("UUID.zig");
+const craft_chat = @import("chat.zig");
 
 pub const std_options: std.Options = .{
     .log_level = .debug,
 };
 
 pub fn main() !void {
-    // 64k stack buffer for heap, should be fine since we only have to allocate the status string
     var gpa = std.heap.GeneralPurposeAllocator(.{
         .verbose_log = std.debug.runtime_safety,
     }).init;
@@ -46,12 +46,12 @@ fn handleTarget(allocator: std.mem.Allocator, arg: []const u8) void {
         std.debug.print("error while pinging {s} -> {any}\n", .{ arg, err });
     };
 
-    loginOffline(allocator, target, .{
-        .username = "Notch",
-        .uuid = .random(std.crypto.random),
-    }) catch |err| {
-        std.debug.print("error while logging into server {s} -> {any}\n", .{ arg, err });
-    };
+    // loginOffline(allocator, target, .{
+    //     .username = "Notch",
+    //     .uuid = .random(std.crypto.random),
+    // }) catch |err| {
+    //     std.debug.print("error while logging into server {s} -> {any}\n", .{ arg, err });
+    // };
 }
 
 fn targetFromArg(raw: []const u8) !Target {
@@ -75,10 +75,14 @@ fn pingPrint(allocator: std.mem.Allocator, target: Target) !void {
     defer arena_allocator.deinit();
 
     const response = try ping(target, &arena_allocator);
-    std.debug.print("{?d}ms {s}\n", .{
-        response.latency_ms,
-        response.status,
-    });
+    var bash_str_buf = std.ArrayList(u8).init(arena_allocator.allocator());
+    try craft_chat.writeBash(
+        response.status.description,
+        .{ .translate_traditional = true },
+        .{},
+        bash_str_buf.writer(),
+    );
+    std.debug.print("{s}\n", .{bash_str_buf.items});
 }
 
 const Target = struct {
@@ -93,7 +97,7 @@ const Profile = struct {
 };
 
 const PingResponse = struct {
-    status: []const u8,
+    status: packets.Status,
     latency_ms: ?i64 = null,
 };
 
