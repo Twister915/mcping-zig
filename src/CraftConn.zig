@@ -91,6 +91,15 @@ pub fn OwnedPacket(comptime Payload: type) type {
     };
 }
 
+pub fn readAndExpectPacket(conn: *Conn, expected_id: i32, comptime Packet: type, arena_allocator: *std.heap.ArenaAllocator) !Packet {
+    const next_packet = try conn.readPacket();
+    if (next_packet.id != expected_id) {
+        return error.UnexpectedPacket;
+    }
+
+    return try next_packet.decodeAs(Packet, arena_allocator);
+}
+
 pub fn readPacket(conn: *Conn) !ReadPkt {
     conn.clearBuffers();
 

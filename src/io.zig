@@ -306,7 +306,6 @@ fn EnumEncoding(comptime E: type) type {
     return Encoding(WireTagFor(E));
 }
 
-// for an int type such as u16, i16, u32, i32, etc... let's just write it as big endian on the wire
 fn encodeInt(
     data: anytype,
     writer: anytype,
@@ -315,12 +314,14 @@ fn encodeInt(
     const Int = @TypeOf(data);
 
     switch (encoding) {
+        // for an int type such as u16, i16, u32, i32, etc... let's just write it as big endian on the wire
         .default => {
             const NUM_BITS = comptime @bitSizeOf(Int);
             const BYTES = comptime std.math.divExact(usize, NUM_BITS, 8) catch @compileError(@typeName(Int) ++ " is not byte sized (divisible by 8), cannot encode");
             try writer.writeInt(Int, data, .big);
             return BYTES;
         },
+        // for a VarInt / VarLong as defined in the protocol
         .varnum => return encodeVarnum(data, writer),
     }
 }
@@ -1205,4 +1206,70 @@ fn lengthJson(
     comptime encoding: JsonEncoding,
 ) !usize {
     return try encodeJson(data, std.io.null_writer, allocator, encoding);
+}
+
+test "encoding numeric tagged union" {
+    const UUID = @import("UUID.zig");
+
+    const PlayerTarget = struct {
+        player_name: []const u8,
+        player_id: UUID,
+
+        pub const ENCODING: Encoding(@This()) = .{
+            .player_name = .{ .length = .{ .max = 12 } },
+        };
+    };
+
+    const ScoreboardActionTag = enum(i32) { add, remove, clear };
+
+    const ScoreboardAction = union(ScoreboardActionTag) {
+        add: PlayerTarget,
+        remove: PlayerTarget,
+        clear,
+
+        pub const ENCODING: Encoding(@This()) = .{ .tag = .varnum };
+    };
+
+    const ScoreboardPacket = struct {
+        actions: []const ScoreboardAction,
+    };
+
+    const sb_pkt: ScoreboardPacket = .{ .actions = &.{
+        .{ .remove = .{
+            .player_name = "joey",
+            .player_id = UUID.random(std.crypto.random),
+        } },
+        .{ .add = .{
+            .player_name = "bill",
+            .player_id = UUID.random(std.crypto.random),
+        } },
+        .{ .add = .{
+            .player_name = "albert",
+            .player_id = UUID.random(std.crypto.random),
+        } },
+        .{ .remove = .{
+            .player_name = "the devil",
+            .player_id = UUID.random(std.crypto.random),
+        } },
+    } };
+
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+
+    var buf = std.ArrayList(u8).init(allocator);
+
+    const sb_pkt_encoding: Encoding(ScoreboardPacket) = .{};
+    _ = try encode(sb_pkt, buf.writer(), allocator, .{});
+    std.debug.print("\nin: {any}\nencoding: {any}\nout:{any}\n", .{ sb_pkt, sb_pkt_encoding, buf.items });
+
+    var stream = std.io.fixedBufferStream(buf.items);
+    const sb_pkt_decoded = (try decode(
+        ScoreboardPacket,
+        stream.reader(),
+        &arena,
+        sb_pkt_encoding,
+    )).unwrap(null);
+    std.debug.print("\ndecoded: {any}\n", .{sb_pkt_decoded});
 }
