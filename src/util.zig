@@ -12,3 +12,20 @@ pub fn stripPrefix(comptime T: type, haystack: *[]const T, prefix: []const T) bo
         return false;
     }
 }
+
+pub fn decodeHexChar(c: u8) ?u4 {
+    return switch (c) {
+        '0'...'9' => @intCast(c - '0'),
+        'a'...'f' => @as(u4, @intCast(c - 'a')) + 10,
+        'A'...'F' => @as(u4, @intCast(c - 'A')) + 10,
+        else => null,
+    };
+}
+
+pub fn hexCharFor(hb: u4) u8 {
+    if (hb < 10) {
+        return @as(u8, @intCast(hb)) + '0';
+    } else {
+        return @as(u8, @intCast(hb - 10)) + 'a';
+    }
+}

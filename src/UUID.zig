@@ -1,4 +1,5 @@
 const std = @import("std");
+const util = @import("util.zig");
 
 const UUID = @This();
 
@@ -76,8 +77,8 @@ fn Emitter(Writer: type) type {
         fn emitByte(self: *Self) !void {
             const b = try self.consumeByte();
             var chars: [2]u8 = undefined;
-            chars[1] = hexCharFor(@intCast(b & 0xF));
-            chars[0] = hexCharFor(@intCast((b >> 4) & 0xF));
+            chars[1] = util.hexCharFor(@intCast(b & 0xF));
+            chars[0] = util.hexCharFor(@intCast((b >> 4) & 0xF));
             try self.writer.writeAll(&chars);
         }
 
@@ -88,14 +89,6 @@ fn Emitter(Writer: type) type {
                 const b = self.raw[0];
                 self.raw = self.raw[1..];
                 return b;
-            }
-        }
-
-        fn hexCharFor(hb: u4) u8 {
-            if (hb < 10) {
-                return @as(u8, @intCast(hb)) + '0';
-            } else {
-                return @as(u8, @intCast(hb - 10)) + 'a';
             }
         }
     };
@@ -138,7 +131,7 @@ const Parser = struct {
         if (optional) {
             if (parser.peekChar()) |pc| {
                 // next char is not a hyphen, but it is a valid hex char
-                if (pc != '-' and decodeHexChar(pc) != null) {
+                if (pc != '-' and util.decodeHexChar(pc) != null) {
                     return false;
                 }
             }
@@ -156,16 +149,7 @@ const Parser = struct {
     }
 
     fn consumeHexChar(parser: *Parser) !u4 {
-        return decodeHexChar(try parser.consumeChar()) orelse error.InvalidHexChar;
-    }
-
-    fn decodeHexChar(c: u8) ?u4 {
-        return switch (c) {
-            '0'...'9' => @intCast(c - '0'),
-            'a'...'f' => @as(u4, @intCast(c - 'a')) + 10,
-            'A'...'F' => @as(u4, @intCast(c - 'A')) + 10,
-            else => null,
-        };
+        return util.decodeHexChar(try parser.consumeChar()) orelse error.InvalidHexChar;
     }
 
     fn peekChar(parser: *Parser) ?u8 {

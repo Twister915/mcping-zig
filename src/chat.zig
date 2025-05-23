@@ -106,8 +106,9 @@ pub const Color = union(ColorType) {
         const color_name = try std.json.innerParse([]const u8, allocator, source, options);
         if (std.meta.stringToEnum(BuiltinColor, color_name)) |builtin| {
             return .{ .builtin = builtin };
+        } else if (HexColor.parseHexColor(color_name)) |hex_color| {
+            return .{ .hex = hex_color };
         } else {
-            // TODO hex
             return error.UnexpectedToken;
         }
     }
@@ -132,7 +133,30 @@ pub const BuiltinColor = enum {
     white,
 };
 
-pub const HexColor = struct { r: u8, g: u8, b: u8 };
+pub const HexColor = struct {
+    r: u8,
+    g: u8,
+    b: u8,
+
+    fn parseHexColor(raw: []const u8) ?HexColor {
+        if (raw.len != 7) return null;
+        if (raw[0] != '#') return null;
+        var rest = raw[1..];
+        const r = decodeHexByte(&rest) orelse return null;
+        const g = decodeHexByte(&rest) orelse return null;
+        const b = decodeHexByte(&rest) orelse return null;
+        return .{ .r = r, .g = g, .b = b };
+    }
+
+    fn decodeHexByte(slice_ptr: *[]const u8) ?u8 {
+        const data = slice_ptr.*;
+        var out: u8 = undefined;
+        out |= @as(u8, @intCast(util.decodeHexChar(data[0]) orelse return null)) << 4;
+        out |= @intCast(util.decodeHexChar(data[1]) orelse return null);
+        slice_ptr.* = data[2..];
+        return out;
+    }
+};
 
 pub const ComponentType = enum {
     text,
@@ -408,31 +432,43 @@ pub const TextIter = struct {
 pub const ParsedTraditional = struct {
     allocator: std.mem.Allocator,
     component: Component,
-    components: []Component,
+    components: ?[]Component = null,
 
     pub fn deinit(self: ParsedTraditional) void {
-        self.allocator.free(self.components);
+        if (self.components) |components| {
+            self.allocator.free(components);
+        }
     }
 };
 
 pub fn parseTraditional(traditional: []const u8, allocator: std.mem.Allocator) !ParsedTraditional {
     var parser: TraditionalParser = .{ .text = traditional };
-    var extras = std.ArrayList(Component).init(allocator);
-    errdefer extras.deinit();
+    const first = parser.next() orelse Component.EMPTY;
 
-    while (parser.next()) |next| {
-        std.debug.print("add node: {any}\n", .{next});
-        try extras.append(next);
+    if (parser.next()) |second| {
+        var extras = std.ArrayList(Component).init(allocator);
+        errdefer extras.deinit();
+
+        try extras.append(first);
+        try extras.append(second);
+
+        while (parser.next()) |next| {
+            try extras.append(next);
+        }
+        const components = try extras.toOwnedSlice();
+        const root_component: Component = .{
+            .text = "",
+            .extra = components,
+        };
+        return .{
+            .component = root_component,
+            .components = components,
+            .allocator = allocator,
+        };
     }
 
-    const components = try extras.toOwnedSlice();
-    const root_component: Component = .{
-        .text = "",
-        .extra = components,
-    };
     return .{
-        .component = root_component,
-        .components = components,
+        .component = first,
         .allocator = allocator,
     };
 }
@@ -602,7 +638,7 @@ fn BashWriter(comptime W: type) type {
         pub fn flush(self: *Self) !void {
             while (try self.writeNext()) {}
             if (self.any_control_codes_emitted) {
-                try self.writeControl("0");
+                try self.writeControl("0", .{});
             }
         }
 
@@ -638,22 +674,22 @@ fn BashWriter(comptime W: type) type {
 
         fn writeControls(self: *Self) !void {
             if (self.styles_changed) {
-                try self.writeControl("0");
+                try self.writeControl("0", .{});
 
                 if (self.formatting.bold) {
-                    try self.writeControl("1");
+                    try self.writeControl("1", .{});
                 }
 
                 if (self.formatting.underlined) {
-                    try self.writeControl("4");
+                    try self.writeControl("4", .{});
                 }
 
                 if (self.formatting.obfuscated) {
-                    try self.writeControl("6");
+                    try self.writeControl("6", .{});
                 }
 
                 if (self.formatting.strikethrough) {
-                    try self.writeControl("9");
+                    try self.writeControl("9", .{});
                 }
 
                 self.styles_changed = false;
@@ -668,7 +704,7 @@ fn BashWriter(comptime W: type) type {
         fn writeColor(self: *Self) !void {
             if (self.formatting.color) |color| {
                 switch (color) {
-                    .builtin => |bc| try self.writeControl(switch (bc) {
+                    .builtin => |bc| try self.writeControl("{s}", .{switch (bc) {
                         .black => "30",
                         .dark_blue => "34",
                         .dark_green => "32",
@@ -685,19 +721,19 @@ fn BashWriter(comptime W: type) type {
                         .light_purple => "95",
                         .yellow => "93",
                         .white => "97",
-                    }),
-                    .hex => return,
+                    }}),
+                    .hex => |hc| try self.writeControl("38;2;{d};{d};{d}", .{ hc.r, hc.g, hc.b }),
                 }
             } else {
-                try self.writeControl("39");
+                try self.writeControl("39", .{});
             }
         }
 
-        fn writeControl(self: *Self, control: []const u8) !void {
+        fn writeControl(self: *Self, comptime fmt: []const u8, args: anytype) !void {
             if (!self.options.no_style) {
                 try self.target.writeByte(0x1B);
                 try self.target.writeByte('[');
-                try self.target.writeAll(control);
+                try self.target.print(fmt, args);
                 try self.target.writeByte('m');
                 self.any_control_codes_emitted = true;
             }
