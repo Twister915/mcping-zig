@@ -6,13 +6,15 @@ const craft_chat = @import("chat.zig");
 const draw = @import("draw.zig");
 
 pub const std_options: std.Options = .{
-    .log_level = .debug,
+    .log_level = if (std.debug.runtime_safety) .debug else .info,
+};
+
+pub const gpa_config: std.heap.GeneralPurposeAllocatorConfig = .{
+    .verbose_log = std.debug.runtime_safety,
 };
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{
-        .verbose_log = std.debug.runtime_safety,
-    }).init;
+    var gpa = std.heap.GeneralPurposeAllocator(gpa_config).init;
     if (std.debug.runtime_safety) {
         defer _ = gpa.detectLeaks();
     }
