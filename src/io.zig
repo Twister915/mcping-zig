@@ -13,6 +13,10 @@ pub fn encode(
         return data.craftEncode(writer, allocator, encoding);
     }
 
+    if (CoerceIntToByte(Data)) |coerced| {
+        return encode(@as(coerced, data), writer, allocator, encoding);
+    }
+
     const Enc: type = Encoding(Data);
     if (Enc == JsonEncoding) {
         return encodeJson(data, writer, allocator, encoding);
@@ -51,6 +55,11 @@ pub fn decode(
         return Data.craftDecode(reader, allocator, encoding);
     }
 
+    if (CoerceIntToByte(Data)) |coerced| {
+        const decoded = try decode(coerced, reader, allocator, encoding);
+        return .{ .value = @as(Data, decoded.value), .bytes_read = decoded.bytes_read };
+    }
+
     const Enc: type = Encoding(Data);
     if (Enc == JsonEncoding) {
         return decodeJson(Data, reader, allocator, encoding);
@@ -87,6 +96,10 @@ pub fn length(
     comptime encoding: Encoding(@TypeOf(data)),
 ) !usize {
     const Data = @TypeOf(data);
+    if (CoerceIntToByte(Data)) |coerced| {
+        return length(@as(coerced, data), allocator, encoding);
+    }
+
     switch (@typeInfo(Data)) {
         .@"struct", .@"enum", .@"union" => {
             if (@hasDecl(Data, "CRAFT_LENGTH")) {
@@ -97,7 +110,7 @@ pub fn length(
     }
 
     if (std.meta.hasFn(Data, "craftLength")) {
-        return Data.craftLength(data, allocator, encoding);
+        return data.craftLength(allocator, encoding);
     }
 
     const Enc: type = Encoding(Data);
@@ -126,6 +139,19 @@ pub fn length(
     };
 }
 
+fn CoerceIntToByte(comptime T: type) ?type {
+    switch (@typeInfo(T)) {
+        .int => |int_info| {
+            if (int_info.signedness == .unsigned and int_info.bits < 8) {
+                return u8;
+            }
+        },
+        else => {},
+    }
+
+    return null;
+}
+
 pub const IntEncoding = enum {
     default,
     varnum,
@@ -140,6 +166,10 @@ pub const JsonEncoding = struct {
 pub fn Encoding(comptime Payload: type) type {
     if (Payload == u8) {
         return void;
+    }
+
+    if (CoerceIntToByte(Payload)) |coerced| {
+        return Encoding(coerced);
     }
 
     switch (@typeInfo(Payload)) {
@@ -183,14 +213,32 @@ pub fn defaultEncoding(comptime Payload: type) Encoding(Payload) {
     return switch (type_info) {
         .int => IntEncoding.default,
         .@"enum" => defaultEncoding(WireTagFor(Payload)),
-        .@"struct", .@"union", .pointer, .optional, .array => .{},
+        .@"struct" => |struct_info| {
+            if (struct_info.backing_integer) |BackingInteger| {
+                return .{ .as_int = defaultEncoding(BackingInteger) };
+            } else {
+                return .{};
+            }
+        },
+        .@"union", .pointer, .optional, .array => .{},
         else => @compileError("no default encoding computable for " ++ @typeName(Payload)),
     };
 }
 
 fn StructEncoding(comptime Struct: type) type {
     const struct_info = @typeInfo(Struct).@"struct";
+    if (struct_info.backing_integer) |BackingInteger| {
+        return union(enum) {
+            by_fields: StructByFieldsEncoding(Struct),
+            as_int: Encoding(BackingInteger),
+        };
+    } else {
+        return StructByFieldsEncoding(Struct);
+    }
+}
 
+fn StructByFieldsEncoding(comptime Struct: type) type {
+    const struct_info = @typeInfo(Struct).@"struct";
     comptime var encoding_fields: [struct_info.fields.len]std.builtin.Type.StructField = undefined;
     for (struct_info.fields, &encoding_fields) |struct_field, *encoding_field| {
         const StructFieldEncoding = Encoding(struct_field.type);
@@ -317,7 +365,7 @@ fn encodeInt(
         // for an int type such as u16, i16, u32, i32, etc... let's just write it as big endian on the wire
         .default => {
             const NUM_BITS = comptime @bitSizeOf(Int);
-            const BYTES = comptime std.math.divExact(usize, NUM_BITS, 8) catch @compileError(@typeName(Int) ++ " is not byte sized (divisible by 8), cannot encode");
+            const BYTES = comptime std.math.divCeil(usize, NUM_BITS, 8) catch unreachable;
             try writer.writeInt(Int, data, .big);
             return BYTES;
         },
@@ -451,6 +499,25 @@ fn encodeStruct(
 ) !usize {
     const Struct = @TypeOf(data);
     const struct_info = @typeInfo(Struct).@"struct";
+    if (struct_info.backing_integer) |BackingInt| {
+        switch (encoding) {
+            .as_int => |int_encoding| return encode(@as(BackingInt, @bitCast(data)), writer, allocator, int_encoding),
+            .by_fields => |fields_encoding| return encodeStructByFields(data, writer, allocator, fields_encoding),
+        }
+    } else {
+        return encodeStructByFields(data, writer, allocator, encoding);
+    }
+}
+
+fn encodeStructByFields(
+    data: anytype,
+    writer: anytype,
+    allocator: std.mem.Allocator,
+    comptime encoding: StructByFieldsEncoding(@TypeOf(data)),
+) !usize {
+    const Struct = @TypeOf(data);
+    const struct_info = @typeInfo(Struct).@"struct";
+
     var bytes: usize = 0;
     inline for (struct_info.fields) |struct_field| {
         const field_data = @field(data, struct_field.name);
@@ -683,7 +750,7 @@ pub fn decodeInt(
     switch (encoding) {
         .default => {
             const NUM_BITS = @bitSizeOf(Int);
-            const BYTES = comptime std.math.divExact(usize, NUM_BITS, 8) catch @compileError(@typeName(Int) ++ " is not byte sized (divisible by 8), cannot encode");
+            const BYTES = comptime std.math.divCeil(usize, NUM_BITS, 8) catch unreachable;
 
             const decoded: Int = try reader.readInt(Int, .big);
             return .{ .bytes_read = BYTES, .value = decoded };
@@ -694,7 +761,7 @@ pub fn decodeInt(
 
 fn decodeVarnum(comptime VarNum: type, reader: anytype) !Decoded(VarNum) {
     const BIT_SIZE = @bitSizeOf(VarNum);
-    const MAX_BYTES = std.math.divCeil(usize, BIT_SIZE, 7) catch unreachable;
+    const MAX_BYTES = comptime std.math.divCeil(usize, BIT_SIZE, 7) catch unreachable;
     var decoded: VarNum = 0;
     var bytes: usize = 0;
     while (true) {
@@ -854,14 +921,40 @@ fn decodeStruct(
     allocator: *std.heap.ArenaAllocator,
     comptime encoding: Encoding(Data),
 ) !Decoded(Data) {
-    const S = @typeInfo(Data).@"struct";
+    const struct_info = @typeInfo(Data).@"struct";
+    if (struct_info.backing_integer) |BackingInt| {
+        switch (encoding) {
+            .as_int => |int_encoding| {
+                const int_repr = try decode(BackingInt, reader, allocator, int_encoding);
+                const as_struct: Data = @bitCast(int_repr.value);
+                return .{
+                    .bytes_read = int_repr.bytes_read,
+                    .value = as_struct,
+                };
+            },
+            .by_fields => |fields_encoding| {
+                return decodeStructByFields(Data, reader, allocator, fields_encoding);
+            },
+        }
+    } else {
+        return decodeStructByFields(Data, reader, allocator, encoding);
+    }
+}
+
+fn decodeStructByFields(
+    comptime Data: type,
+    reader: anytype,
+    allocator: *std.heap.ArenaAllocator,
+    comptime encoding: StructByFieldsEncoding(Data),
+) !Decoded(Data) {
+    const struct_info = @typeInfo(Data).@"struct";
     var decoded_value: Data = undefined;
     var bytes: usize = 0;
 
-    inline for (S.fields) |Field| {
-        const field_encoding = @field(encoding, Field.name);
-        const field_dcd = try decode(Field.type, reader, allocator, field_encoding);
-        @field(decoded_value, Field.name) = field_dcd.unwrap(&bytes);
+    inline for (struct_info.fields) |struct_field| {
+        const field_encoding = @field(encoding, struct_field.name);
+        const field_dcd = try decode(struct_field.type, reader, allocator, field_encoding);
+        @field(decoded_value, struct_field.name) = field_dcd.unwrap(&bytes);
     }
 
     return .{
@@ -1063,7 +1156,11 @@ fn decodeJson(
     };
 }
 
-pub fn lengthInt(data: anytype, comptime encoding: IntEncoding) !usize {
+fn lengthInt(data: anytype, comptime encoding: Encoding(@TypeOf(data))) !usize {
+    if (@TypeOf(data) == u8) {
+        return 1;
+    }
+
     return switch (encoding) {
         .default => @sizeOf(@TypeOf(data)),
         .varnum => @max(1, try std.math.divCeil(
@@ -1071,6 +1168,15 @@ pub fn lengthInt(data: anytype, comptime encoding: IntEncoding) !usize {
             @bitSizeOf(@TypeOf(data)) - @clz(data),
             7,
         )),
+    };
+}
+
+pub const MAX_VAR_INT_LENGTH = maxIntLength(i32, .varnum);
+
+pub fn maxIntLength(comptime Int: type, comptime encoding: IntEncoding) usize {
+    return switch (encoding) {
+        .default => @sizeOf(Int),
+        .varnum => std.math.divCeil(usize, @bitSizeOf(Int), 7) catch unreachable,
     };
 }
 
@@ -1102,7 +1208,7 @@ fn lengthPointer(
                 .enabled => |lp| {
                     const Counter: type = lp.Counter();
                     const c: Counter = @intCast(count);
-                    bytes += try lengthInt(c, lp.encoding);
+                    bytes += try length(c, allocator, lp.encoding);
                 },
                 .disabled => {},
             }
@@ -1128,7 +1234,23 @@ fn lengthStruct(
 ) !usize {
     const Data = @TypeOf(data);
     const struct_info = @typeInfo(Data).@"struct";
+    if (struct_info.backing_integer) |BackingInt| {
+        switch (encoding) {
+            .as_int => |int_encoding| return length(@as(BackingInt, @bitCast(data)), allocator, int_encoding),
+            .by_fields => |fields_encoding| return lengthStructByFields(data, allocator, fields_encoding),
+        }
+    } else {
+        return lengthStructByFields(data, allocator, encoding);
+    }
+}
 
+fn lengthStructByFields(
+    data: anytype,
+    allocator: std.mem.Allocator,
+    comptime encoding: StructByFieldsEncoding(@TypeOf(data)),
+) !usize {
+    const Data = @TypeOf(data);
+    const struct_info = @typeInfo(Data).@"struct";
     var l: usize = 0;
     inline for (struct_info.fields) |field| {
         const field_data = @field(data, field.name);
@@ -1151,7 +1273,7 @@ fn lengthArray(
         .enabled => |lp| {
             const C = lp.Counter();
             const count = @as(C, @intCast(array_info.len));
-            bytes += try lengthInt(count, lp.encoding);
+            bytes += try length(count, allocator, lp.encoding);
         },
         .disabled => {},
     }

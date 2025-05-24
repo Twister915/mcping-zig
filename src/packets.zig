@@ -216,7 +216,7 @@ pub const LoginPluginRequestPacket = struct {
     };
 };
 
-pub const LoginCookieRequestPacket = struct {
+pub const CookieRequestPacket = struct {
     key: []const u8,
 };
 
@@ -246,7 +246,7 @@ pub const LoginPluginResponsePacket = struct {
     };
 };
 
-pub const LoginCookieResponsePacket = struct {
+pub const CookieResponsePacket = struct {
     key: []const u8,
     payload: ?[]const u8, // optional bytes
 
@@ -256,3 +256,85 @@ pub const LoginCookieResponsePacket = struct {
         .payload = .{ .length = .{ .max = 0x1400 } },
     };
 };
+
+pub const ConfigClientInformationPacket = struct {
+    locale: []const u8,
+    view_distance: u8,
+    chat_mode: enum(i32) {
+        enabled = 0,
+        commands_only = 1,
+        hidden = 2,
+    },
+    chat_colors: bool,
+    displayed_skin_parts: packed struct {
+        cape_enabled: bool, // 0x01
+        jacket_enabled: bool, // 0x02
+        left_sleeve_enabled: bool, // 0x04
+        right_sleeve_enabled: bool, // 0x08
+        left_pants_leg_enabled: bool, // 0x10
+        right_pants_leg_enabled: bool, // 0x20
+        hat_enabled: bool, // 0x40
+    },
+    main_hand: enum(i32) {
+        left = 0,
+        right = 1,
+    },
+    enable_text_filtering: bool,
+    allow_server_listings: bool,
+    particle_status: enum(i32) {
+        all = 0,
+        decreased = 1,
+        minimal = 2,
+    },
+
+    pub const Encoding = craft_io.Encoding(@This());
+    pub const ENCODING: Encoding = .{
+        .locale = .{ .length = .{ .max = 16 } },
+        .chat_mode = .varnum,
+        .main_hand = .varnum,
+        .particle_status = .varnum,
+    };
+};
+
+test "encoding of config client information packet" {
+    const packet: ConfigClientInformationPacket = .{
+        .locale = "en_US",
+        .view_distance = 16,
+        .chat_mode = .enabled,
+        .chat_colors = true,
+        .displayed_skin_parts = .{
+            .cape_enabled = true,
+            .jacket_enabled = true,
+            .left_sleeve_enabled = true,
+            .right_sleeve_enabled = true,
+            .left_pants_leg_enabled = true,
+            .right_pants_leg_enabled = true,
+            .hat_enabled = true,
+        },
+        .main_hand = .right,
+        .enable_text_filtering = false,
+        .allow_server_listings = true,
+        .particle_status = .all,
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var buf = std.ArrayList(u8).init(allocator);
+    _ = try craft_io.encode(packet, buf.writer(), allocator, ConfigClientInformationPacket.ENCODING);
+    std.debug.print("encoded {d} bytes -> {any}\n", .{ buf.items.len, buf.items });
+}
+
+pub const ConfigPluginMessagePacket = struct {
+    channel: []const u8,
+    data: []const u8,
+
+    pub const Encoding = craft_io.Encoding(@This());
+    pub const ENCODING: Encoding = .{
+        .channel = .{ .length = .{ .max = 0x7FFF } },
+        .data = .{ .length = .{ .prefix = .disabled, .max = 0x100000 } },
+    };
+};
+
+pub const KeepAlivePacket = struct { id: i64 };
+pub const ConfigPingPacket = struct { id: i32 };

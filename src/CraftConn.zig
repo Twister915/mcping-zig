@@ -21,7 +21,6 @@ const Conn = @This();
 
 const Compression = struct {
     threshold: usize,
-    buf: std.ArrayList(u8),
 };
 
 const Encryption = struct {
@@ -44,10 +43,6 @@ pub fn connect(allocator: std.mem.Allocator, address: []const u8, port: u16) !Co
 }
 
 pub fn deinit(conn: *Conn) void {
-    if (conn.compression) |*compression| {
-        compression.buf.deinit();
-    }
-
     conn.buf.deinit();
     conn.socket.close();
     log.debug("{*} connection shutdown", .{conn});
@@ -58,6 +53,7 @@ pub const ReadPkt = struct {
     id: i32,
     // we're borrowing this memory from the connection, so that's why there's const and no deinit
     payload: []const u8,
+    bytes_read: usize,
 
     const Self = @This();
 
@@ -119,45 +115,80 @@ pub fn readPacket(conn: *Conn) !ReadPkt {
 fn readPacketFrom(conn: *Conn, reader: anytype) !ReadPkt {
     conn.clearBuffers();
 
+    // decode the packet length, which is always uncompressed
     const pkt_length_decoded = try craft_io.decodeInt(i32, reader, .varnum);
-    var bytes_read = pkt_length_decoded.bytes_read;
-    var bytes_decoded = bytes_read;
     const pkt_length: usize = @intCast(pkt_length_decoded.value);
+    // start tracking how many bytes we read off the wire, and how many bytes are left
+    var bytes_read = pkt_length_decoded.bytes_read;
+    var bytes_left = pkt_length;
 
-    var id_and_payload: []u8 = undefined;
-    if (conn.compression) |*compress| {
-        const data_length_decoded = try craft_io.decodeInt(i32, reader, .varnum);
-        bytes_read += data_length_decoded.bytes_read;
-        bytes_decoded += data_length_decoded.bytes_read;
+    // track how many bytes we read from the underlying reader by wrapping it with a counting reader
+    var socket_read_counter = std.io.countingReader(reader);
+    const counting_reader = socket_read_counter.reader();
+
+    var pkt: ReadPkt = undefined;
+    var did_read_pkt = false;
+    var expected_data_length: usize = undefined;
+
+    if (conn.compression != null) {
+        // if compression is enabled, then we must decode the data length (uncompressed)
+        const data_length_decoded = try craft_io.decodeInt(i32, counting_reader, .varnum);
         const data_length: usize = @intCast(data_length_decoded.value);
-        const bytes_left = pkt_length - data_length_decoded.bytes_read;
-        if (data_length == 0) {
-            // packet is not compressed, just read it into the buffer
-            id_and_payload = try conn.buf.addManyAsSlice(bytes_left);
-            try reader.readNoEof(id_and_payload);
-            bytes_read += bytes_left;
-            bytes_decoded += bytes_left;
-        } else {
-            // packet is compressed, read it into the compression buffer
-            const compressed_buf = try compress.buf.addManyAsSlice(bytes_left);
-            try reader.readNoEof(compressed_buf);
-            bytes_read += bytes_left;
+        bytes_read += data_length_decoded.bytes_read;
+        bytes_left -= data_length_decoded.bytes_read;
 
-            // decompress
-            var compressed_stream = std.io.fixedBufferStream(compressed_buf);
-            try std.compress.zlib.decompress(compressed_stream.reader(), conn.buf.writer());
-            bytes_decoded += conn.buf.items.len;
-            id_and_payload = conn.buf.items;
-            if (id_and_payload.len != data_length) {
-                return error.DecompressDataLengthMismatch;
-            }
+        if (data_length > 0) {
+            // if data_length is non-zero, then the bytes which follow are compressed
+            expected_data_length = data_length;
+
+            // create a decompressing reader
+            var decompressor = std.compress.zlib.decompressor(counting_reader);
+            const decompress_reader = decompressor.reader();
+            log.debug(
+                "{*} [rx:decompress] data_length={d}, bytes_left={d}, bytes_read={d}",
+                .{ conn, data_length, bytes_left, bytes_read },
+            );
+            // read the id + payload out of the decompress reader
+            pkt = try conn.readPacketWithLengthFrom(decompress_reader, data_length, bytes_read);
+            did_read_pkt = true;
+        } else {
+            // if data_length is 0, then the packet is not compressed, and the expected length is pkt_length - 1 (1 byte for 0 data length)
+            expected_data_length = pkt_length - 1;
         }
     } else {
-        id_and_payload = try conn.buf.addManyAsSlice(pkt_length);
-        try reader.readNoEof(id_and_payload);
-        bytes_read += pkt_length;
-        bytes_decoded += pkt_length;
+        // if compression is disabled, then the id + payload is just all the remaining bytes which == pkt_length
+        expected_data_length = pkt_length;
     }
+
+    // did_read_pkt = true when compression is enabled and the packet exceeds the threshold (and was decompressed)
+    // so if did_read_pkt == false, then we should read the uncompressed packet data from the reader
+    if (!did_read_pkt) {
+        pkt = try conn.readPacketWithLengthFrom(counting_reader, bytes_left, bytes_read);
+    }
+
+    // now check if we read all the bytes we were supposed to
+    const actual_bytes_read: usize = @intCast(socket_read_counter.bytes_read);
+    const extra_bytes_available: usize = pkt_length - actual_bytes_read;
+
+    // when we decompress, there are sometimes extra bytes left at the end (for some reason), so we will skip those bytes
+    if (extra_bytes_available > 0) {
+        try reader.skipBytes(extra_bytes_available, .{ .buf_size = 32 });
+    }
+
+    // if the decoded packet length doesn't match the expected data length, something went wrong, which means the entire
+    // connection is in an invalid state, and we cannot proceed
+    if (pkt.bytes_read != expected_data_length) {
+        return error.UnexpectedBytesRead;
+    }
+
+    return pkt;
+}
+
+fn readPacketWithLengthFrom(conn: *Conn, reader: anytype, size: usize, bytes_already_read: usize) !ReadPkt {
+    var bytes_decoded = bytes_already_read;
+    const id_and_payload = try conn.buf.addManyAsSlice(size);
+    try reader.readNoEof(id_and_payload);
+    bytes_decoded += size;
 
     var id_payload_stream = std.io.fixedBufferStream(id_and_payload);
     const id_decoded = try craft_io.decodeInt(i32, id_payload_stream.reader(), .varnum);
@@ -165,17 +196,16 @@ fn readPacketFrom(conn: *Conn, reader: anytype) !ReadPkt {
     const payload = id_and_payload[id_decoded.bytes_read..]; // skip the bytes for the ID
 
     log.debug(
-        "{*} [rx]: id={x}, bytes_read={d}, bytes_decoded={d}, payload_bytes={d}",
+        "{*} [rx]: id=0x{x}, bytes_decoded={d}, payload_bytes={d}",
         .{
             conn,
             id,
-            bytes_read,
             bytes_decoded,
             payload.len,
         },
     );
 
-    return .{ .id = id, .payload = payload };
+    return .{ .id = id, .payload = payload, .bytes_read = size };
 }
 
 pub fn writePacket(conn: *Conn, id: i32, packet: anytype) !usize {
@@ -199,60 +229,85 @@ pub fn writePacketWithEncoding(
     const allocator = arena_allocator.allocator();
 
     const payload_length = try craft_io.length(packet, allocator, encoding);
-    const id_length = try craft_io.lengthInt(id, .varnum);
-    const payload_and_id_length = payload_length + id_length;
-    var bytes_encoded: usize = 0;
+    const id_length = try craft_io.length(id, allocator, .varnum);
+    const data_length = payload_length + id_length;
+    const buf_writer = conn.buf.writer();
+    var bytes_to_write: []const u8 = undefined;
     if (conn.compression) |*comp| {
-        // [length]
-        // [data length] (or 0)
-        // [compressed packet] (or uncompressed)
-        if (payload_and_id_length > comp.threshold) {
-            const data_length: i32 = @intCast(payload_and_id_length);
-            // write the compressed data to comp.buf
-            var compressor = try std.compress.zlib.compressor(comp.buf.writer(), .{});
+        // compression is enabled
+        if (data_length > comp.threshold) {
+            // we already know the length of the uncompressed packet, so we can also calculate the length of
+            // the data length at this time
+            const data_length_length = try craft_io.length(data_length, allocator, .varnum);
+
+            // reserve extra space in conn.buf to encode two numbers: [total length], [uncompressed data length]
+            //
+            // we already know [uncompressed data length], but we don't know the total length until compression is
+            // complete, so we will reserve 5 + lengthOf(uncompressed data length) bytes, since a VarInt can have
+            // a maximum size of 5 bytes.
+            const prefix_size = craft_io.MAX_VAR_INT_LENGTH + data_length_length;
+            const prefix_buf = try conn.buf.addManyAsSlice(prefix_size);
+
+            // compress directly to conn.buf (after the prefix space we reserved)
+            var compressor = try std.compress.zlib.compressor(buf_writer, .{});
             const compressor_writer = compressor.writer();
-            bytes_encoded += try craft_io.encode(id, compressor_writer, allocator, .varnum);
-            bytes_encoded += try craft_io.encode(packet, compressor_writer, allocator, encoding);
+            _ = try craft_io.encode(id, compressor_writer, allocator, .varnum);
+            _ = try craft_io.encode(packet, compressor_writer, allocator, encoding);
             try compressor.finish();
 
-            // write the packet we actually intend to send
-            const actual_size: usize = (try craft_io.length(data_length, allocator, .varnum)) + comp.buf.items.len;
-            const conn_buf_writer = conn.buf.writer();
-            bytes_encoded += try craft_io.encode(@as(i32, @intCast(actual_size)), conn_buf_writer, allocator, .varnum);
-            bytes_encoded += try craft_io.encode(data_length, conn_buf_writer, allocator, .varnum);
-            try conn.buf.appendSlice(comp.buf.items);
+            // calculate how many bytes the compressor wrote, which will give us the # of bytes in compressed(id + payload)
+            const compressed_payload_length = conn.buf.items.len - prefix_size;
+            // total length is the data_length_length + the number of bytes in the compressed(id + payload)
+            const total_length: i32 = @intCast(data_length_length + compressed_payload_length);
+            // this is the number of bytes required to encode the total_length
+            const total_length_length = try craft_io.length(total_length, allocator, .varnum);
+
+            // now we will encode the total_length such that it comes right before the data_length.
+            // we do this by skipping whatever bytes we don't need, and start writing at an index higher than 0
+            const prefix_offset = prefix_buf.len - (total_length_length + data_length_length);
+            const prefix_dst = prefix_buf[prefix_offset..];
+            var prefix_stream = std.io.fixedBufferStream(prefix_dst);
+            const prefix_writer = prefix_stream.writer();
+            // encode total length
+            _ = try craft_io.encode(total_length, prefix_writer, allocator, .varnum);
+            // encode data length
+            _ = try craft_io.encode(@as(i32, @intCast(data_length)), prefix_writer, allocator, .varnum);
+            // by definition, the compressed data should immediately follow the data_length
+            bytes_to_write = conn.buf.items[prefix_offset..];
         } else {
-            _ = try craft_io.encode(@as(i32, @intCast(payload_and_id_length + 1)), conn.buf.writer(), allocator, .varnum);
-            try conn.buf.append(0); // data length == 0
-            _ = try craft_io.encode(id, conn.buf.writer(), allocator, .varnum);
-            _ = try craft_io.encode(packet, conn.buf.writer(), allocator, encoding);
-            bytes_encoded += conn.buf.items.len;
+            // compression is enabled but the threshold is not met, so we can just write the uncompressed packet, and a data_length of 0
+            // total_length is trivial to calculate... data_length + 1 (because of the extra 0 for data_length=0)
+
+            // encode total_length
+            _ = try craft_io.encode(@as(i32, @intCast(data_length + 1)), buf_writer, allocator, .varnum);
+            // encode data_length=0
+            try buf_writer.writeByte(0);
+            // encode id + payload
+            _ = try craft_io.encode(id, buf_writer, allocator, .varnum);
+            _ = try craft_io.encode(packet, buf_writer, allocator, encoding);
+            bytes_to_write = conn.buf.items;
         }
     } else {
-        _ = try craft_io.encode(@as(i32, @intCast(payload_and_id_length)), conn.buf.writer(), allocator, .varnum);
-        _ = try craft_io.encode(id, conn.buf.writer(), allocator, .varnum);
-        _ = try craft_io.encode(packet, conn.buf.writer(), allocator, encoding);
-        bytes_encoded += conn.buf.items.len;
+        // compression is disabled, so we just write total_length, id, packet
+        _ = try craft_io.encode(@as(i32, @intCast(data_length)), buf_writer, allocator, .varnum);
+        _ = try craft_io.encode(id, buf_writer, allocator, .varnum);
+        _ = try craft_io.encode(packet, buf_writer, allocator, encoding);
+        bytes_to_write = conn.buf.items;
     }
 
-    const bytes_to_send = conn.buf.items;
-    if (conn.encryption) |*encryption| {
-        encryption.tx.encrypt(bytes_to_send);
-    }
+    // send the prepared bytes over the socket
+    try conn.socket.writeAll(bytes_to_write);
 
-    const n_bytes_written = bytes_to_send.len;
-    try conn.socket.writeAll(bytes_to_send);
     log.debug(
-        "{*} [tx]: id={x}, bytes_written={d}, bytes_encoded={d}, payload_bytes={d}",
+        "{*} [tx]: id=0x{x}, bytes_written={d}, payload_bytes={d}",
         .{
             conn,
             id,
-            n_bytes_written,
-            bytes_encoded,
+            bytes_to_write.len,
             payload_length,
         },
     );
-    return bytes_to_send.len;
+    return bytes_to_write.len;
 }
 
 pub fn setCompressionThreshold(conn: *Conn, threshold: usize) !void {
@@ -260,11 +315,8 @@ pub fn setCompressionThreshold(conn: *Conn, threshold: usize) !void {
         return error.CompressionAlreadyEnabled;
     }
 
-    conn.compression = .{
-        .buf = std.ArrayList(u8).init(conn.allocator),
-        .threshold = threshold,
-    };
-    log.debug("{*} compression enabled, threshold = {n}", .{ conn, threshold });
+    conn.compression = .{ .threshold = threshold };
+    log.debug("{*} compression enabled, threshold = {d}", .{ conn, threshold });
 }
 
 pub fn isCompressionEnabled(conn: *const Conn) bool {
@@ -286,9 +338,6 @@ pub fn isEncryptionEnabled(conn: *Conn) bool {
 
 fn clearBuffers(conn: *Conn) void {
     conn.buf.clearRetainingCapacity();
-    if (conn.compression) |*e| {
-        e.buf.clearRetainingCapacity();
-    }
 }
 
 fn defaultPacketEncoding(comptime Packet: type) craft_io.Encoding(Packet) {

@@ -108,7 +108,7 @@ test "two side communication" {
     var rx: Cipher = .init(key, key);
     var tx: Cipher = .init(key, key);
 
-    const msg = "hello world";
+    const msg = "hello world, my name is joe, and this is a test of my cfb8 encryption mechanism. This is a really long message to ensure there's no issues if the message gets large like this. I wonder if the compiler will inline the while loop since it knows the length of the source data at compile time...";
     var msg_encrypted: [msg.len]u8 = undefined;
     @memcpy(&msg_encrypted, msg);
 
@@ -120,7 +120,9 @@ test "two side communication" {
     var decrypted_msg = std.ArrayList(u8).init(std.testing.allocator);
     defer decrypted_msg.deinit();
 
-    try decrypted_reader.readAllArrayList(&decrypted_msg, 128);
+    const MAX_BYTES_READ: usize = 1024;
+    std.debug.assert(MAX_BYTES_READ >= msg.len);
+    try decrypted_reader.readAllArrayList(&decrypted_msg, MAX_BYTES_READ);
 
     try std.testing.expectEqual(msg.len, decrypted_msg.items.len);
     try std.testing.expectEqualStrings(msg, decrypted_msg.items);
