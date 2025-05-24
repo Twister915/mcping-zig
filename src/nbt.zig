@@ -16,16 +16,16 @@ pub const TagType = enum(u8) {
     int_array = 11,
     long_array = 12,
 
-    fn decodeTag(type_id: TagType, reader: anytype, allocator: std.mem.Allocator) !craft_io.Decoded(Tag) {
+    fn decodeTag(type_id: TagType, reader: anytype, allocator: std.mem.Allocator) anyerror!craft_io.Decoded(Tag) {
         return switch (type_id) {
-            .end => .end,
-            .byte => .{ .byte = @intCast(try reader.readByte()) },
-            .short => .{ .short = try reader.readInt(i16, .big) },
-            .int => .{ .int = try reader.readInt(i32, .big) },
-            .long => .{ .long = try reader.readInt(i64, .big) },
-            .float => .{ .float = @bitCast(try reader.readInt(u32, .big)) },
-            .double => .{ .float = @bitCast(try reader.readInt(u64, .big)) },
-            .byte_array => try decodeByteArrayTag(reader),
+            .end => .{ .value = .end, .bytes_read = 0 },
+            .byte => .{ .value = .{ .byte = @intCast(try reader.readByte()) }, .bytes_read = 1 },
+            .short => .{ .value = .{ .short = try reader.readInt(i16, .big) }, .bytes_read = 2 },
+            .int => .{ .value = .{ .int = try reader.readInt(i32, .big) }, .bytes_read = 4 },
+            .long => .{ .value = .{ .long = try reader.readInt(i64, .big) }, .bytes_read = 8 },
+            .float => .{ .value = .{ .float = @bitCast(try reader.readInt(u32, .big)) }, .bytes_read = 4 },
+            .double => .{ .value = .{ .double = @bitCast(try reader.readInt(u64, .big)) }, .bytes_read = 8 },
+            .byte_array => try decodeByteArrayTag(reader, allocator),
             .string => try decodeStringTag(reader, allocator),
             .list => try decodeListTag(reader, allocator),
             .compound => try decodeCompoundTag(reader, allocator),
@@ -47,14 +47,14 @@ pub const Tag = union(TagType) {
     string: []const u8,
     list: List,
     compound: []const NamedTag,
-    int_array: []i32,
-    long_array: []i64,
+    int_array: []const i32,
+    long_array: []const i64,
 
     pub const List = union(TagType) {
         end,
         byte: []const i8,
         short: []const i16,
-        int: []const i13,
+        int: []const i32,
         long: []const i64,
         float: []const f32,
         double: []const f64,
@@ -112,43 +112,75 @@ pub const Tag = union(TagType) {
         writer: anytype,
         allocator: std.mem.Allocator,
         comptime encoding: void,
-    ) !usize {}
+    ) !usize {
+        _ = allocator;
+        _ = encoding;
+        return encodeTag(tag, writer);
+    }
 
     pub fn craftLength(
         tag: Tag,
         allocator: std.mem.Allocator,
         comptime encoding: void,
-    ) !usize {}
+    ) !usize {
+        _ = allocator;
+        _ = encoding;
+        return lengthTag(tag);
+    }
 };
 
 pub const NamedTag = struct {
     name: []const u8,
     tag: Tag,
 
-    pub const CraftEncoding: type = void;
+    pub const CraftEncoding: type = struct {
+        root_has_no_name: bool = true,
+    };
 
     pub fn craftDecode(
         reader: anytype,
         allocator: *std.heap.ArenaAllocator,
-        comptime encoding: void,
+        comptime encoding: CraftEncoding,
     ) !craft_io.Decoded(NamedTag) {
-        _ = encoding;
-        return try decodeTag(reader, allocator.allocator());
+        if (encoding.root_has_no_name) {
+            const dcd = try decodeTag(reader, allocator.allocator());
+            return .{ .value = .{ .name = "", .tag = dcd.value }, .bytes_read = dcd.bytes_read };
+        } else {
+            return decodeNamedTag(reader, allocator.allocator());
+        }
     }
 
     pub fn craftEncode(
         named_tag: NamedTag,
         writer: anytype,
         allocator: std.mem.Allocator,
-        comptime encoding: void,
-    ) !usize {}
+        comptime encoding: CraftEncoding,
+    ) !usize {
+        _ = allocator;
+        if (encoding.root_has_no_name) {
+            return encodeTag(named_tag.tag, writer);
+        } else {
+            return encodeNamedTag(named_tag, writer);
+        }
+    }
 
     pub fn craftLength(
         named_tag: NamedTag,
         allocator: std.mem.Allocator,
         comptime encoding: void,
-    ) !usize {}
+    ) !usize {
+        _ = allocator;
+        if (encoding.root_has_no_name) {
+            return lengthTag(named_tag.tag);
+        } else {
+            return lengthNamedTag(named_tag);
+        }
+    }
 };
+
+fn lengthNamedTag(named_tag: NamedTag) !usize {
+    return encodeNamedTag(named_tag, std.io.null_writer);
+}
 
 fn encodeNamedTag(named_tag: NamedTag, writer: anytype) !usize {
     var bytes_written: usize = 0;
@@ -161,18 +193,26 @@ fn encodeNamedTag(named_tag: NamedTag, writer: anytype) !usize {
 }
 
 fn decodeNamedTag(reader: anytype, allocator: std.mem.Allocator) !craft_io.Decoded(NamedTag) {
-    const tag_id = try decodeTagType(reader);
+    var bytes_read: usize = 0;
+    const tag_id = (try decodeTagType(reader)).unwrap(&bytes_read);
     if (tag_id == .end) {
-        return .{ .name = "", .tag = .end };
+        return .{ .value = .{ .name = "", .tag = .end }, .bytes_read = bytes_read };
     }
 
-    const name = try decodeString(reader, allocator);
-    const tag = try tag_id.decodeTag(reader, allocator);
-    return .{ .name = name, .tag = tag };
+    const name = (try decodeString(reader, allocator)).unwrap(&bytes_read);
+    const tag = (try tag_id.decodeTag(reader, allocator)).unwrap(&bytes_read);
+    return .{ .value = .{ .name = name, .tag = tag }, .bytes_read = bytes_read };
+}
+
+fn lengthTag(tag: Tag) !usize {
+    return encodeTag(tag, std.io.null_writer);
 }
 
 fn decodeTag(reader: anytype, allocator: std.mem.Allocator) !craft_io.Decoded(Tag) {
-    return try (try decodeTagType(reader)).decodeTag(reader, allocator);
+    var bytes_read: usize = 0;
+    const tag_type = (try decodeTagType(reader)).unwrap(&bytes_read);
+    const tag = (try tag_type.decodeTag(reader, allocator)).unwrap(&bytes_read);
+    return .{ .value = tag, .bytes_read = bytes_read };
 }
 
 fn encodeTag(tag: Tag, writer: anytype) !usize {
@@ -212,7 +252,7 @@ fn encodeTag(tag: Tag, writer: anytype) !usize {
 }
 
 fn decodeTagType(reader: anytype) !craft_io.Decoded(TagType) {
-    const tag_type: TagType = std.meta.intToEnum(try reader.readByte()) catch {
+    const tag_type: TagType = std.meta.intToEnum(TagType, try reader.readByte()) catch {
         return error.UnknownNbtType;
     };
     return .{ .bytes_read = 1, .value = tag_type };
@@ -225,7 +265,7 @@ fn encodeTagType(tag_type: TagType, writer: anytype) !usize {
 
 fn decodeByteArrayTag(reader: anytype, allocator: std.mem.Allocator) !craft_io.Decoded(Tag) {
     const bytes_dcd = try decodeLengthPrefixedBytes(i32, reader, allocator);
-    return .{ .value = .{ .byte_array = bytes_dcd.value }, .bytes_read = bytes_dcd.bytes_read };
+    return .{ .value = .{ .byte_array = @ptrCast(bytes_dcd.value) }, .bytes_read = bytes_dcd.bytes_read };
 }
 
 fn decodeStringTag(reader: anytype, allocator: std.mem.Allocator) !craft_io.Decoded(Tag) {
@@ -234,11 +274,11 @@ fn decodeStringTag(reader: anytype, allocator: std.mem.Allocator) !craft_io.Deco
 }
 
 fn decodeString(reader: anytype, allocator: std.mem.Allocator) !craft_io.Decoded([]const u8) {
-    return decodeLengthPrefixedBytes(i16, reader, allocator);
+    return decodeLengthPrefixedBytes(u16, reader, allocator);
 }
 
 fn encodeString(str: []const u8, writer: anytype) !usize {
-    return encodeLengthPrefixedBytes(i16, str, writer);
+    return encodeLengthPrefixedBytes(u16, str, writer);
 }
 
 fn decodeLengthPrefixedBytes(comptime Counter: type, reader: anytype, allocator: std.mem.Allocator) !craft_io.Decoded([]const u8) {
@@ -303,7 +343,7 @@ fn decodeList(reader: anytype, allocator: std.mem.Allocator) !craft_io.Decoded(T
                 bytes_read += item_dcd.bytes_read;
                 item.* = @field(item_dcd.value, tag_field.name);
             }
-            return @unionInit(Tag.List, tag_field.name, out);
+            return .{ .value = @unionInit(Tag.List, tag_field.name, out), .bytes_read = bytes_read };
         }
     }
 
@@ -336,11 +376,20 @@ fn decodeCompound(reader: anytype, allocator: std.mem.Allocator) !craft_io.Decod
     while (true) {
         const next_tag = (try decodeNamedTag(reader, allocator)).unwrap(&bytes_read);
         if (next_tag.tag == .end) {
-            return .{ .bytes_read = bytes_read, .value = buf.toOwnedSlice() };
+            return .{ .bytes_read = bytes_read, .value = try buf.toOwnedSlice() };
         }
 
         try buf.append(next_tag);
     }
+}
+
+fn encodeCompound(data: []const NamedTag, writer: anytype) !usize {
+    var bytes_written: usize = 0;
+    for (data) |item| {
+        bytes_written += try encodeNamedTag(item, writer);
+    }
+    bytes_written += try encodeTagType(.end, writer);
+    return bytes_written;
 }
 
 fn decodeIntArrayTag(reader: anytype, allocator: std.mem.Allocator) !craft_io.Decoded(Tag) {
@@ -348,7 +397,7 @@ fn decodeIntArrayTag(reader: anytype, allocator: std.mem.Allocator) !craft_io.De
     return .{ .value = .{ .int_array = int_array_dcd.value }, .bytes_read = int_array_dcd.bytes_read };
 }
 
-fn decodeLongArrayTag(reader: anytype, allocator: std.mem.Allocator) !Tag {
+fn decodeLongArrayTag(reader: anytype, allocator: std.mem.Allocator) !craft_io.Decoded(Tag) {
     const long_array_dcd = try decodeIntArray(i64, reader, allocator);
     return .{ .value = .{ .long_array = long_array_dcd.value }, .bytes_read = long_array_dcd.bytes_read };
 }
@@ -381,4 +430,41 @@ fn encodeIntArray(data: anytype, writer: anytype) !usize {
     }
 
     return bytes_written;
+}
+
+test "decode wiki example" {
+    const example: []const u8 = &.{
+        0x0a, 0x0a, 0x00, 0x0b, 0x68, 0x65, 0x6c, 0x6c,
+        0x6f, 0x20, 0x77, 0x6f, 0x72, 0x6c, 0x64, 0x08,
+        0x00, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x00, 0x09,
+        0x42, 0x61, 0x6e, 0x61, 0x6e, 0x72, 0x61, 0x6d,
+        0x61, 0x00, 0x00,
+    };
+
+    var stream = std.io.fixedBufferStream(example);
+    var arena_allocator = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_allocator.deinit();
+    const decoded = try craft_io.decode(
+        NamedTag,
+        stream.reader(),
+        &arena_allocator,
+        .{},
+    );
+
+    const expected: NamedTag = .{
+        .name = "",
+        .tag = .{
+            .compound = &.{
+                .{ .name = "hello world", .tag = .{
+                    .compound = &.{
+                        .{ .name = "name", .tag = .{
+                            .string = "Bananrama",
+                        } },
+                    },
+                } },
+            },
+        },
+    };
+
+    try std.testing.expectEqualDeep(expected, decoded.value);
 }
