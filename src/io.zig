@@ -13,8 +13,12 @@ pub fn encode(
         return data.craftEncode(writer, allocator, encoding);
     }
 
-    if (CoerceIntToByte(Data)) |coerced| {
-        return encode(@as(coerced, data), writer, allocator, encoding);
+    const data_info = @typeInfo(Data);
+    if (data_info == .int) {
+        const ByteInt = std.math.ByteAlignedInt(Data);
+        if (ByteInt != Data) {
+            return encode(@as(ByteInt, @intCast(data)), writer, allocator, encoding);
+        }
     }
 
     const Enc: type = Encoding(Data);
@@ -31,7 +35,7 @@ pub fn encode(
         return 0;
     }
 
-    return switch (@typeInfo(Data)) {
+    return switch (data_info) {
         .int => encodeInt(data, writer, encoding),
         .bool => encode(@as(u8, if (data) 1 else 0), writer, allocator, {}),
         .float => encodeFloat(data, writer),
@@ -55,9 +59,13 @@ pub fn decode(
         return Data.craftDecode(reader, allocator, encoding);
     }
 
-    if (CoerceIntToByte(Data)) |coerced| {
-        const decoded = try decode(coerced, reader, allocator, encoding);
-        return .{ .value = @as(Data, decoded.value), .bytes_read = decoded.bytes_read };
+    const data_info = @typeInfo(Data);
+    if (data_info == .int) {
+        const ByteInt = std.math.ByteAlignedInt(Data);
+        if (ByteInt != Data) {
+            const decoded = try decode(ByteInt, reader, allocator, encoding);
+            return .{ .value = @as(Data, @intCast(decoded.value)), .bytes_read = decoded.bytes_read };
+        }
     }
 
     const Enc: type = Encoding(Data);
@@ -76,7 +84,7 @@ pub fn decode(
         return .{ .bytes_read = 0, .value = {} };
     }
 
-    return switch (@typeInfo(Data)) {
+    return switch (data_info) {
         .int => decodeInt(Data, reader, encoding),
         .bool => decodeBool(reader),
         .float => decodeFloat(Data, reader),
@@ -96,11 +104,16 @@ pub fn length(
     comptime encoding: Encoding(@TypeOf(data)),
 ) !usize {
     const Data = @TypeOf(data);
-    if (CoerceIntToByte(Data)) |coerced| {
-        return length(@as(coerced, data), allocator, encoding);
+    const data_info = @typeInfo(Data);
+
+    if (data_info == .int) {
+        const ByteInt = std.math.ByteAlignedInt(Data);
+        if (ByteInt != Data) {
+            return length(@as(ByteInt, @intCast(data)), allocator, encoding);
+        }
     }
 
-    switch (@typeInfo(Data)) {
+    switch (data_info) {
         .@"struct", .@"enum", .@"union" => {
             if (@hasDecl(Data, "CRAFT_LENGTH")) {
                 return Data.CRAFT_LENGTH;
@@ -126,7 +139,7 @@ pub fn length(
         return 0;
     }
 
-    return switch (@typeInfo(Data)) {
+    return switch (data_info) {
         .int => lengthInt(data, encoding),
         .bool, .float => @sizeOf(Data),
         .pointer => lengthPointer(data, allocator, encoding),
@@ -137,19 +150,6 @@ pub fn length(
         .@"union" => lengthUnion(data, allocator, encoding),
         else => @compileError(@typeName(Data) ++ " is not supported by craft encoding / decoding"),
     };
-}
-
-fn CoerceIntToByte(comptime T: type) ?type {
-    switch (@typeInfo(T)) {
-        .int => |int_info| {
-            if (int_info.signedness == .unsigned and int_info.bits < 8) {
-                return u8;
-            }
-        },
-        else => {},
-    }
-
-    return null;
 }
 
 pub const IntEncoding = enum {
@@ -168,11 +168,16 @@ pub fn Encoding(comptime Payload: type) type {
         return void;
     }
 
-    if (CoerceIntToByte(Payload)) |coerced| {
-        return Encoding(coerced);
+    const payload_info = @typeInfo(Payload);
+
+    if (payload_info == .int) {
+        const ByteAligned = std.math.ByteAlignedInt(Payload);
+        if (ByteAligned != Payload) {
+            return Encoding(ByteAligned);
+        }
     }
 
-    switch (@typeInfo(Payload)) {
+    switch (payload_info) {
         .@"struct", .@"union", .@"enum" => {
             if (@hasDecl(Payload, "CraftEncoding")) {
                 return Payload.CraftEncoding;
@@ -181,7 +186,7 @@ pub fn Encoding(comptime Payload: type) type {
         else => {},
     }
 
-    return switch (@typeInfo(Payload)) {
+    return switch (payload_info) {
         .int => IntEncoding,
         .bool, .void, .float => void,
         .@"struct" => StructEncoding(Payload),
