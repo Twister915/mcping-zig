@@ -208,10 +208,11 @@ fn readPacketWithLengthFrom(conn: *Conn, reader: anytype, size: usize, bytes_alr
     return .{ .id = id, .payload = payload, .bytes_read = size };
 }
 
-pub fn writePacket(conn: *Conn, id: i32, packet: anytype) !usize {
+pub fn writePacket(conn: *Conn, id: i32, packet: anytype, diag: craft_io.Diag) !usize {
     return conn.writePacketWithEncoding(
         id,
         packet,
+        diag,
         comptime defaultPacketEncoding(@TypeOf(packet)),
     );
 }
@@ -220,6 +221,7 @@ pub fn writePacketWithEncoding(
     conn: *Conn,
     id: i32,
     packet: anytype,
+    diag: craft_io.Diag,
     comptime encoding: craft_io.Encoding(@TypeOf(packet)),
 ) !usize {
     conn.clearBuffers();
@@ -228,8 +230,18 @@ pub fn writePacketWithEncoding(
     defer arena_allocator.deinit();
     const allocator = arena_allocator.allocator();
 
-    const payload_length = try craft_io.length(packet, allocator, encoding);
-    const id_length = try craft_io.length(id, allocator, .varnum);
+    const payload_length = try craft_io.length(
+        packet,
+        allocator,
+        try diag.child(.packet_body),
+        encoding,
+    );
+    const id_length = try craft_io.length(
+        id,
+        allocator,
+        try diag.child(.packet_id),
+        .varnum,
+    );
     const data_length = payload_length + id_length;
     const buf_writer = conn.buf.writer();
     var bytes_to_write: []const u8 = undefined;
@@ -238,7 +250,12 @@ pub fn writePacketWithEncoding(
         if (data_length > comp.threshold) {
             // we already know the length of the uncompressed packet, so we can also calculate the length of
             // the data length at this time
-            const data_length_length = try craft_io.length(data_length, allocator, .varnum);
+            const data_length_length = try craft_io.length(
+                data_length,
+                allocator,
+                try diag.child(.packet_data_length),
+                .varnum,
+            );
 
             // reserve extra space in conn.buf to encode two numbers: [total length], [uncompressed data length]
             //
@@ -251,8 +268,20 @@ pub fn writePacketWithEncoding(
             // compress directly to conn.buf (after the prefix space we reserved)
             var compressor = try std.compress.zlib.compressor(buf_writer, .{});
             const compressor_writer = compressor.writer();
-            _ = try craft_io.encode(id, compressor_writer, allocator, .varnum);
-            _ = try craft_io.encode(packet, compressor_writer, allocator, encoding);
+            _ = try craft_io.encode(
+                id,
+                compressor_writer,
+                allocator,
+                try diag.child(.packet_id),
+                .varnum,
+            );
+            _ = try craft_io.encode(
+                packet,
+                compressor_writer,
+                allocator,
+                try diag.child(.packet_body),
+                encoding,
+            );
             try compressor.finish();
 
             // calculate how many bytes the compressor wrote, which will give us the # of bytes in compressed(id + payload)
@@ -260,7 +289,12 @@ pub fn writePacketWithEncoding(
             // total length is the data_length_length + the number of bytes in the compressed(id + payload)
             const total_length: i32 = @intCast(data_length_length + compressed_payload_length);
             // this is the number of bytes required to encode the total_length
-            const total_length_length = try craft_io.length(total_length, allocator, .varnum);
+            const total_length_length = try craft_io.length(
+                total_length,
+                allocator,
+                try diag.child(.packet_length),
+                .varnum,
+            );
 
             // now we will encode the total_length such that it comes right before the data_length.
             // we do this by skipping whatever bytes we don't need, and start writing at an index higher than 0
@@ -269,9 +303,21 @@ pub fn writePacketWithEncoding(
             var prefix_stream = std.io.fixedBufferStream(prefix_dst);
             const prefix_writer = prefix_stream.writer();
             // encode total length
-            _ = try craft_io.encode(total_length, prefix_writer, allocator, .varnum);
+            _ = try craft_io.encode(
+                total_length,
+                prefix_writer,
+                allocator,
+                try diag.child(.packet_length),
+                .varnum,
+            );
             // encode data length
-            _ = try craft_io.encode(@as(i32, @intCast(data_length)), prefix_writer, allocator, .varnum);
+            _ = try craft_io.encode(
+                @as(i32, @intCast(data_length)),
+                prefix_writer,
+                allocator,
+                try diag.child(.packet_data_length),
+                .varnum,
+            );
             // by definition, the compressed data should immediately follow the data_length
             bytes_to_write = conn.buf.items[prefix_offset..];
         } else {
@@ -279,19 +325,55 @@ pub fn writePacketWithEncoding(
             // total_length is trivial to calculate... data_length + 1 (because of the extra 0 for data_length=0)
 
             // encode total_length
-            _ = try craft_io.encode(@as(i32, @intCast(data_length + 1)), buf_writer, allocator, .varnum);
+            _ = try craft_io.encode(
+                @as(i32, @intCast(data_length + 1)),
+                buf_writer,
+                allocator,
+                try diag.child(.packet_length),
+                .varnum,
+            );
             // encode data_length=0
             try buf_writer.writeByte(0);
             // encode id + payload
-            _ = try craft_io.encode(id, buf_writer, allocator, .varnum);
-            _ = try craft_io.encode(packet, buf_writer, allocator, encoding);
+            _ = try craft_io.encode(
+                id,
+                buf_writer,
+                allocator,
+                try diag.child(.packet_id),
+                .varnum,
+            );
+            _ = try craft_io.encode(
+                packet,
+                buf_writer,
+                allocator,
+                try diag.child(.packet_body),
+                encoding,
+            );
             bytes_to_write = conn.buf.items;
         }
     } else {
         // compression is disabled, so we just write total_length, id, packet
-        _ = try craft_io.encode(@as(i32, @intCast(data_length)), buf_writer, allocator, .varnum);
-        _ = try craft_io.encode(id, buf_writer, allocator, .varnum);
-        _ = try craft_io.encode(packet, buf_writer, allocator, encoding);
+        _ = try craft_io.encode(
+            @as(i32, @intCast(data_length)),
+            buf_writer,
+            allocator,
+            try diag.child(.packet_length),
+            .varnum,
+        );
+        _ = try craft_io.encode(
+            id,
+            buf_writer,
+            allocator,
+            try diag.child(.packet_id),
+            .varnum,
+        );
+        _ = try craft_io.encode(
+            packet,
+            buf_writer,
+            allocator,
+            try diag.child(.packet_body),
+            encoding,
+        );
         bytes_to_write = conn.buf.items;
     }
 

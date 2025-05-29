@@ -111,21 +111,13 @@ pub const Tag = union(TagType) {
         tag: Tag,
         writer: anytype,
         allocator: std.mem.Allocator,
+        diag: craft_io.Diag,
         comptime encoding: void,
     ) !usize {
         _ = allocator;
         _ = encoding;
+        _ = diag; // FIXME diag
         return encodeTag(tag, writer);
-    }
-
-    pub fn craftLength(
-        tag: Tag,
-        allocator: std.mem.Allocator,
-        comptime encoding: void,
-    ) !usize {
-        _ = allocator;
-        _ = encoding;
-        return lengthTag(tag);
     }
 };
 
@@ -154,33 +146,18 @@ pub const NamedTag = struct {
         named_tag: NamedTag,
         writer: anytype,
         allocator: std.mem.Allocator,
+        diag: craft_io.Diag,
         comptime encoding: CraftEncoding,
     ) !usize {
         _ = allocator;
+        _ = diag; // FIXME diag
         if (encoding.root_has_no_name) {
             return encodeTag(named_tag.tag, writer);
         } else {
             return encodeNamedTag(named_tag, writer);
         }
     }
-
-    pub fn craftLength(
-        named_tag: NamedTag,
-        allocator: std.mem.Allocator,
-        comptime encoding: void,
-    ) !usize {
-        _ = allocator;
-        if (encoding.root_has_no_name) {
-            return lengthTag(named_tag.tag);
-        } else {
-            return lengthNamedTag(named_tag);
-        }
-    }
 };
-
-fn lengthNamedTag(named_tag: NamedTag) !usize {
-    return encodeNamedTag(named_tag, std.io.null_writer);
-}
 
 fn encodeNamedTag(named_tag: NamedTag, writer: anytype) !usize {
     var bytes_written: usize = 0;
@@ -202,10 +179,6 @@ fn decodeNamedTag(reader: anytype, allocator: std.mem.Allocator) !craft_io.Decod
     const name = (try decodeString(reader, allocator)).unwrap(&bytes_read);
     const tag = (try tag_id.decodeTag(reader, allocator)).unwrap(&bytes_read);
     return .{ .value = .{ .name = name, .tag = tag }, .bytes_read = bytes_read };
-}
-
-fn lengthTag(tag: Tag) !usize {
-    return encodeTag(tag, std.io.null_writer);
 }
 
 fn decodeTag(reader: anytype, allocator: std.mem.Allocator) !craft_io.Decoded(Tag) {
