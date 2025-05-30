@@ -66,24 +66,25 @@ pub fn decode(
     comptime Data: type,
     reader: anytype,
     allocator: *std.heap.ArenaAllocator,
+    diag: Diag,
     comptime encoding: Encoding(Data),
 ) !Decoded(Data) {
     if (std.meta.hasFn(Data, "craftDecode")) {
-        return Data.craftDecode(reader, allocator, encoding);
+        return Data.craftDecode(reader, allocator, diag, encoding);
     }
 
     const data_info = @typeInfo(Data);
     if (data_info == .int) {
         const ByteInt = std.math.ByteAlignedInt(Data);
         if (ByteInt != Data) {
-            const decoded = try decode(ByteInt, reader, allocator, encoding);
+            const decoded = try decode(ByteInt, reader, allocator, diag, encoding);
             return .{ .value = @as(Data, @intCast(decoded.value)), .bytes_read = decoded.bytes_read };
         }
     }
 
     const Enc: type = Encoding(Data);
     if (Enc == JsonEncoding) {
-        return decodeJson(Data, reader, allocator, encoding);
+        return decodeJson(Data, reader, allocator, diag, encoding);
     }
 
     if (Data == u8) {
@@ -98,15 +99,15 @@ pub fn decode(
     }
 
     return switch (data_info) {
-        .int => decodeInt(Data, reader, encoding),
-        .bool => decodeBool(reader),
-        .float => decodeFloat(Data, reader),
-        .pointer => decodePointer(Data, reader, allocator, encoding),
-        .@"struct" => decodeStruct(Data, reader, allocator, encoding),
-        .array => decodeArray(Data, reader, allocator, encoding),
-        .optional => decodeOptional(Data, reader, allocator, encoding),
-        .@"enum" => decodeEnum(Data, reader, allocator, encoding),
-        .@"union" => decodeUnion(Data, reader, allocator, encoding),
+        .int => decodeInt(Data, reader, diag, encoding),
+        .bool => decodeBool(reader, diag),
+        .float => decodeFloat(Data, reader, diag),
+        .pointer => decodePointer(Data, reader, allocator, diag, encoding),
+        .@"struct" => decodeStruct(Data, reader, allocator, diag, encoding),
+        .array => decodeArray(Data, reader, allocator, diag, encoding),
+        .optional => decodeOptional(Data, reader, allocator, diag, encoding),
+        .@"enum" => decodeEnum(Data, reader, allocator, diag, encoding),
+        .@"union" => decodeUnion(Data, reader, allocator, diag, encoding),
         else => @compileError(@typeName(Data) ++ " cannot be craft decoded"),
     };
 }
@@ -822,6 +823,7 @@ pub fn Decoded(comptime T: type) type {
 pub fn decodeInt(
     comptime Int: type,
     reader: anytype,
+    diag: Diag,
     comptime encoding: IntEncoding,
 ) !Decoded(Int) {
     switch (encoding) {
@@ -832,11 +834,11 @@ pub fn decodeInt(
             const decoded: Int = try reader.readInt(Int, .big);
             return .{ .bytes_read = BYTES, .value = decoded };
         },
-        .varnum => return decodeVarnum(Int, reader),
+        .varnum => return decodeVarnum(Int, reader, diag),
     }
 }
 
-fn decodeVarnum(comptime VarNum: type, reader: anytype) !Decoded(VarNum) {
+fn decodeVarnum(comptime VarNum: type, reader: anytype, diag: Diag) !Decoded(VarNum) {
     const BIT_SIZE = @bitSizeOf(VarNum);
     const MAX_BYTES = comptime std.math.divCeil(usize, BIT_SIZE, 7) catch unreachable;
     var decoded: VarNum = 0;
@@ -849,23 +851,27 @@ fn decodeVarnum(comptime VarNum: type, reader: anytype) !Decoded(VarNum) {
         if ((b & 0x80) == 0) {
             return .{ .bytes_read = bytes, .value = decoded };
         } else if (bytes >= MAX_BYTES) {
+            diag.report(error.VarNumTooLong, @typeName(VarNum), "too many bytes while decoding var num", .{});
             return error.VarNumTooLong;
         }
     }
 }
 
-fn decodeBool(reader: anytype) !Decoded(bool) {
+fn decodeBool(reader: anytype, diag: Diag) !Decoded(bool) {
     return .{
         .bytes_read = 1,
         .value = switch (try reader.readByte()) {
             0x00 => false,
             0x01 => true,
-            else => return error.UnexpectedBoolByte,
+            else => |other| {
+                diag.report(error.UnexpectedBoolByte, "bool", "bad bool value 0x{X:0>2}", .{other});
+                return error.UnexpectedBoolByte;
+            },
         },
     };
 }
 
-fn decodeFloat(comptime Float: type, reader: anytype) !Decoded(Float) {
+fn decodeFloat(comptime Float: type, reader: anytype, diag: Diag) !Decoded(Float) {
     const NUM_BITS = @bitSizeOf(Float);
 
     // craft protocol defined to only work for "float" and "double" aka f32, f64
@@ -883,15 +889,16 @@ fn decodeFloat(comptime Float: type, reader: anytype) !Decoded(Float) {
         .signedness = .unsigned,
     } });
 
-    const intDecoded: Decoded(AsInt) = try decodeInt(AsInt, reader, .default);
-    const f = @as(Float, @bitCast(intDecoded));
-    return .{ .bytes_read = intDecoded.bytes_read, .value = f };
+    const int_decoded: Decoded(AsInt) = try decodeInt(AsInt, reader, diag, .default);
+    const f = @as(Float, @bitCast(int_decoded.value));
+    return .{ .bytes_read = int_decoded.bytes_read, .value = f };
 }
 
 fn decodePointer(
     comptime Data: type,
     reader: anytype,
     arena_allocator: *std.heap.ArenaAllocator,
+    diag: Diag,
     comptime encoding: Encoding(Data),
 ) !Decoded(Data) {
     const allocator = arena_allocator.allocator();
@@ -914,6 +921,7 @@ fn decodePointer(
                                     Cnt,
                                     reader,
                                     allocator,
+                                    try diag.child(.length_prefix),
                                     lp.encoding,
                                 )).unwrap(&bytes_read),
                             );
@@ -935,11 +943,12 @@ fn decodePointer(
                     } else {
                         // otherwise, decode each item individually
                         const items_encoding = encoding.items;
-                        for (buf) |*target| {
+                        for (buf, 0..) |*target, idx| {
                             target.* = (try decode(
                                 Elem,
                                 reader,
                                 allocator,
+                                try diag.child(.{ .index = idx }),
                                 items_encoding,
                             )).unwrap(&bytes_read);
                         }
@@ -955,7 +964,7 @@ fn decodePointer(
                     const allocated_ptr: NonConstPointer(Data) = try allocator.create(Payload);
                     errdefer allocator.destroy(allocated_ptr);
 
-                    const decoded_payload = try decode(Payload, reader, allocator, encoding);
+                    const decoded_payload = try decode(Payload, reader, allocator, diag, encoding);
                     allocated_ptr.* = decoded_payload.value;
                     return .{ .bytes_read = decoded_payload.bytes_read, .value = allocated_ptr };
                 },
@@ -982,8 +991,19 @@ fn decodePointer(
                 .enabled => |lp| {
                     // decode the counter from the wire
                     const Counter = lp.Counter();
-                    const count: usize = @intCast((try decodeInt(Counter, reader, lp.encoding)).unwrap(&bytes));
+                    const count: usize = @intCast((try decodeInt(
+                        Counter,
+                        reader,
+                        try diag.child(.length_prefix),
+                        lp.encoding,
+                    )).unwrap(&bytes));
                     if (count > encoding.max_items) {
+                        diag.report(
+                            error.PacketTooBig,
+                            @typeName(Data),
+                            "decoded length prefix {d} larger than max_items {d}",
+                            .{ count, encoding.max_items },
+                        );
                         return error.PacketTooBig;
                     }
 
@@ -1005,8 +1025,14 @@ fn decodePointer(
                         try reader.readNoEof(dst);
                         bytes += count;
                     } else {
-                        for (dst) |*item| {
-                            item.* = (try decode(Payload, reader, arena_allocator, encoding.items)).unwrap(&bytes);
+                        for (dst, 0..) |*item, idx| {
+                            item.* = (try decode(
+                                Payload,
+                                reader,
+                                arena_allocator,
+                                try diag.child(.{ .index = idx }),
+                                encoding.items,
+                            )).unwrap(&bytes);
                         }
                     }
                 },
@@ -1049,13 +1075,14 @@ fn decodeStruct(
     comptime Data: type,
     reader: anytype,
     allocator: *std.heap.ArenaAllocator,
+    diag: Diag,
     comptime encoding: Encoding(Data),
 ) !Decoded(Data) {
     const struct_info = @typeInfo(Data).@"struct";
     if (struct_info.backing_integer) |BackingInt| {
         switch (encoding) {
             .as_int => |int_encoding| {
-                const int_repr = try decode(BackingInt, reader, allocator, int_encoding);
+                const int_repr = try decode(BackingInt, reader, allocator, diag, int_encoding);
                 const as_struct: Data = @bitCast(int_repr.value);
                 return .{
                     .bytes_read = int_repr.bytes_read,
@@ -1063,11 +1090,11 @@ fn decodeStruct(
                 };
             },
             .by_fields => |fields_encoding| {
-                return decodeStructByFields(Data, reader, allocator, fields_encoding);
+                return decodeStructByFields(Data, reader, allocator, diag, fields_encoding);
             },
         }
     } else {
-        return decodeStructByFields(Data, reader, allocator, encoding);
+        return decodeStructByFields(Data, reader, allocator, diag, encoding);
     }
 }
 
@@ -1075,6 +1102,7 @@ fn decodeStructByFields(
     comptime Data: type,
     reader: anytype,
     allocator: *std.heap.ArenaAllocator,
+    diag: Diag,
     comptime encoding: StructByFieldsEncoding(Data),
 ) !Decoded(Data) {
     const struct_info = @typeInfo(Data).@"struct";
@@ -1083,7 +1111,13 @@ fn decodeStructByFields(
 
     inline for (struct_info.fields) |struct_field| {
         const field_encoding = @field(encoding, struct_field.name);
-        const field_dcd = try decode(struct_field.type, reader, allocator, field_encoding);
+        const field_dcd = try decode(
+            struct_field.type,
+            reader,
+            allocator,
+            try diag.child(.{ .field = struct_field.name }),
+            field_encoding,
+        );
         @field(decoded_value, struct_field.name) = field_dcd.unwrap(&bytes);
     }
 
@@ -1097,6 +1131,7 @@ fn decodeArray(
     comptime Data: type,
     reader: anytype,
     allocator: *std.heap.ArenaAllocator,
+    diag: Diag,
     comptime encoding: Encoding(Data),
 ) !Decoded(Data) {
     const array_info = @typeInfo(Data).array;
@@ -1109,10 +1144,17 @@ fn decodeArray(
                 Counter,
                 reader,
                 allocator,
+                try diag.child(.length_prefix),
                 lp.encoding,
             )).unwrap(&bytes);
 
             if (@as(usize, @intCast(c)) != array_info.len) {
+                diag.report(
+                    error.DecodeWrongSizedArray,
+                    @typeName(Data),
+                    "expected exact size {d} but decoded length prefix size {d}",
+                    .{ array_info.len, c },
+                );
                 return error.DecodeWrongSizedArray;
             }
         },
@@ -1126,11 +1168,12 @@ fn decodeArray(
         bytes += array_info.len;
     } else {
         const items_encoding = encoding.items;
-        inline for (&out) |*elem| {
+        inline for (&out, 0..) |*elem, idx| {
             elem.* = (try decode(
                 Payload,
                 reader,
                 allocator,
+                try diag.child(.{ .index = idx }),
                 items_encoding,
             )).unwrap(&bytes);
         }
@@ -1146,6 +1189,7 @@ fn decodeOptional(
     comptime Data: type,
     reader: anytype,
     allocator: *std.heap.ArenaAllocator,
+    diag: Diag,
     comptime encoding: Encoding(Data),
 ) !Decoded(Data) {
     const optional_info = @typeInfo(Data).optional;
@@ -1161,6 +1205,7 @@ fn decodeOptional(
         bool,
         reader,
         allocator,
+        try diag.child(.optional_prefix),
         {},
     )).unwrap(&out.bytes_read);
 
@@ -1170,6 +1215,7 @@ fn decodeOptional(
             optional_info.child,
             reader,
             allocator,
+            try diag.child(.payload),
             encoding,
         )).unwrap(&out.bytes_read);
     } else {
@@ -1183,6 +1229,7 @@ fn decodeEnum(
     comptime Enum: type,
     reader: anytype,
     allocator: *std.heap.ArenaAllocator,
+    diag: Diag,
     comptime encoding: Encoding(Enum),
 ) !Decoded(Enum) {
     const enum_info = @typeInfo(Enum).@"enum";
@@ -1193,6 +1240,7 @@ fn decodeEnum(
         WireTag,
         reader,
         allocator,
+        diag,
         encoding,
     );
 
@@ -1236,6 +1284,7 @@ fn decodeUnion(
     comptime Union: type,
     reader: anytype,
     allocator: *std.heap.ArenaAllocator,
+    diag: Diag,
     comptime encoding: Encoding(Union),
 ) !Decoded(Union) {
     const union_info = @typeInfo(Union).@"union";
@@ -1246,14 +1295,26 @@ fn decodeUnion(
     const TagType: type = union_info.tag_type.?;
     const tag_info = @typeInfo(TagType).@"enum";
     var bytes: usize = 0;
-    const tag_value: TagType = (try decode(TagType, reader, allocator, encoding.tag)).unwrap(&bytes);
+    const tag_value: TagType = (try decode(
+        TagType,
+        reader,
+        allocator,
+        try diag.child(.tag),
+        encoding.tag,
+    )).unwrap(&bytes);
     const tag_int: tag_info.tag_type = @intFromEnum(tag_value);
     // todo is this the best way to deal with this?
     inline for (union_info.fields, tag_info.fields) |union_field, enum_field| {
         if (enum_field.value == tag_int) {
             const Payload: type = union_field.type;
             const payload_encoding: Encoding(Payload) = @field(encoding.fields, enum_field.name);
-            const payload: Payload = (try decode(Payload, reader, allocator, payload_encoding)).unwrap(&bytes);
+            const payload: Payload = (try decode(
+                Payload,
+                reader,
+                allocator,
+                try diag.child(.payload),
+                payload_encoding,
+            )).unwrap(&bytes);
             const out: Union = @unionInit(Union, union_field.name, payload);
             return .{
                 .bytes_read = bytes,
@@ -1269,16 +1330,22 @@ fn decodeJson(
     comptime Data: type,
     reader: anytype,
     arena_allocator: *std.heap.ArenaAllocator,
+    diag: Diag,
     comptime encoding: JsonEncoding,
 ) !Decoded(Data) {
-    const str_decode = try decode([]u8, reader, arena_allocator, encoding.string_encoding);
+    const str_decode = try decode([]u8, reader, arena_allocator, diag, encoding.string_encoding);
     const allocator = arena_allocator.allocator();
     // we don't deallocate str_decode because json parser might point to the memory allocated for the string
 
     // we use leaky here because we are guranteed to be using an arena allocator
     const parsed: Data = std.json.parseFromSliceLeaky(Data, allocator, str_decode.value, encoding.parse_options) catch |err| {
-        std.debug.print("failed to parse JSON: {s}\n", .{str_decode.value});
-        return err;
+        diag.report(
+            error.FailedJsonDecode,
+            @typeName(Data),
+            "failed to JSON decode ({any}) from string: {s}",
+            .{ err, str_decode.value },
+        );
+        return error.FailedJsonDecode;
     };
     return .{
         .value = parsed,
@@ -1373,6 +1440,7 @@ test "encoding numeric tagged union" {
         ScoreboardPacket,
         stream.reader(),
         &arena,
+        diag_state.diag(),
         sb_pkt_encoding,
     )).unwrap(null);
     std.debug.print("\ndecoded: {any}\n", .{sb_pkt_decoded});
@@ -1539,6 +1607,13 @@ test "encode heap arrays u8" {
         decode_stream.reader(),
         &decode_arena,
         .{},
+        .{},
     )).unwrap(null);
     try std.testing.expectEqualDeep(test_pkt, test_pkt_decoded);
 }
+
+pub const Position = packed struct {
+    x: i26,
+    z: i26,
+    y: i12,
+};

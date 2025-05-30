@@ -130,9 +130,11 @@ pub const Tag = union(TagType) {
     pub fn craftDecode(
         reader: anytype,
         allocator: *std.heap.ArenaAllocator,
+        diag: craft_io.Diag,
         comptime encoding: void,
     ) !craft_io.Decoded(Tag) {
         _ = encoding;
+        _ = diag; // FIXME diag
         return try decodeTag(reader, allocator.allocator());
     }
 
@@ -161,8 +163,10 @@ pub const NamedTag = struct {
     pub fn craftDecode(
         reader: anytype,
         allocator: *std.heap.ArenaAllocator,
+        diag: craft_io.Diag,
         comptime encoding: CraftEncoding,
     ) !craft_io.Decoded(NamedTag) {
+        _ = diag; // FIXME diag
         if (encoding.root_has_no_name) {
             const dcd = try decodeTag(reader, allocator.allocator());
             return .{
@@ -495,6 +499,7 @@ test "decode wiki example" {
         NamedTag,
         stream.reader(),
         &arena_allocator,
+        .{},
         .{},
     );
 

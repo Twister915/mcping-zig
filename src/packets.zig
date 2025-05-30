@@ -452,3 +452,229 @@ pub const ConfigResourcePackResponsePacket = struct {
         .result = .varnum,
     };
 };
+
+pub const PlayLoginPacket = struct {
+    entity_id: i32,
+    is_hardcore: bool,
+    dimension_names: []const []const u8,
+    max_players: i32, // ignored
+    view_distance: i32,
+    simulation_distance: i32,
+    reduced_debug_info: bool,
+    enable_respawn_screen: bool,
+    do_limited_crafting: bool,
+    dimension_type: i32, // refers to an ID set in the minecraft:dimension registry
+    dimension_name: []const u8,
+    hashed_seed: i64,
+    game_mode: GameMode,
+    previous_game_mode: PreviousGameMode,
+    is_debug: bool,
+    is_flat: bool,
+    death_location: ?struct {
+        dimension: []const u8,
+        location: craft_io.Position,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .dimension = .{ .max_items = MAX_IDENTIFIER_SIZE },
+        };
+    },
+    portal_cooldown: i32,
+    sea_level: i32,
+    enforces_secure_chat: bool,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .dimension_names = .{ .items = .{ .max_items = MAX_IDENTIFIER_SIZE } },
+        .max_players = .varnum,
+        .view_distance = .varnum,
+        .simulation_distance = .varnum,
+        .dimension_type = .varnum,
+        .portal_cooldown = .varnum,
+        .sea_level = .varnum,
+    };
+
+    pub const GameMode = enum(u8) {
+        survival = 0,
+        creative = 1,
+        adventure = 2,
+        spectator = 3,
+    };
+
+    pub const PreviousGameMode = enum(i8) {
+        undefined = -1,
+        survival = 0,
+        creative = 1,
+        adventure = 2,
+        spectator = 3,
+
+        pub fn toGameMode(prev_gm: PreviousGameMode) ?GameMode {
+            return switch (prev_gm) {
+                .undefined => null,
+                else => @enumFromInt(@intFromEnum(prev_gm)),
+            };
+        }
+    };
+};
+
+pub const PlayMapDataPacket = struct {
+    map_id: i32,
+    scale: i8,
+    locked: bool,
+    icons: ?[]const Icon,
+    color_patch: ColorPatch,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .map_id = .varnum,
+    };
+
+    pub const Icon = struct {
+        type: enum(i32) {
+            white_arrow = 0,
+            green_arrow = 1,
+            red_arrow = 2,
+            blue_arrow = 3,
+            white_cross = 4,
+            red_pointer = 5,
+            white_circle = 6,
+            small_white_circle = 7,
+            mansion = 8,
+            monument = 9,
+            white_banner = 10,
+            orange_banner = 11,
+            magenta_banner = 12,
+            light_blue_banner = 13,
+            yellow_banner = 14,
+            lime_banner = 15,
+            pink_banner = 16,
+            gray_banner = 17,
+            light_gray_banner = 18,
+            cyan_banner = 19,
+            purple_banner = 20,
+            blue_banner = 21,
+            brown_banner = 22,
+            green_banner = 23,
+            red_banner = 24,
+            black_banner = 25,
+            treasure_marker = 26,
+            desert_village = 27,
+            plains_village = 28,
+            savanna_village = 29,
+            snowy_village = 30,
+            taiga_village = 31,
+            jungle_temple = 32,
+            swamp_hut = 33,
+            trial_chambers = 34,
+        },
+        x: i8,
+        z: i8,
+        direction: i8,
+        display_name: ?chat.Component,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .type = .varnum,
+        };
+    };
+
+    pub const ColorPatchData = struct {
+        columns: u8,
+        rows: u8,
+        x: u8,
+        z: u8,
+        data: []const u8,
+    };
+
+    pub const ColorPatch = struct {
+        data: ?ColorPatchData,
+
+        pub const CraftEncoding: type = void;
+        pub const ENCODING: CraftEncoding = {};
+
+        pub fn craftEncode(
+            patches: ColorPatch,
+            writer: anytype,
+            allocator: std.mem.Allocator,
+            diag: craft_io.Diag,
+            comptime encoding: CraftEncoding,
+        ) !usize {
+            _ = encoding;
+
+            if (patches.data) |inner| {
+                return craft_io.encode(inner, writer, allocator, diag, .{});
+            } else {
+                return craft_io.encode(@as(u8, 0), writer, allocator, diag, {});
+            }
+        }
+
+        pub fn craftDecode(
+            reader: anytype,
+            allocator: *std.heap.ArenaAllocator,
+            diag: craft_io.Diag,
+            comptime encoding: CraftEncoding,
+        ) !craft_io.Decoded(ColorPatch) {
+            _ = encoding;
+
+            var bytes_read: usize = 0;
+            const columns = (try craft_io.decode(
+                u8,
+                reader,
+                allocator,
+                try diag.child(.{ .field = "columns" }),
+                {},
+            )).unwrap(&bytes_read);
+            if (columns == 0) {
+                return .{
+                    .value = .{ .data = null },
+                    .bytes_read = bytes_read,
+                };
+            }
+
+            const rows = (try craft_io.decode(
+                u8,
+                reader,
+                allocator,
+                try diag.child(.{ .field = "rows" }),
+                {},
+            )).unwrap(&bytes_read);
+            const x = (try craft_io.decode(
+                u8,
+                reader,
+                allocator,
+                try diag.child(.{ .field = "x" }),
+                {},
+            )).unwrap(&bytes_read);
+            const z = (try craft_io.decode(
+                u8,
+                reader,
+                allocator,
+                try diag.child(.{ .field = "z" }),
+                {},
+            )).unwrap(&bytes_read);
+            const data = (try craft_io.decode(
+                []const u8,
+                reader,
+                allocator,
+                try diag.child(.{ .field = "data" }),
+                .{},
+            )).unwrap(&bytes_read);
+            return .{
+                .value = .{ .data = .{ .columns = columns, .rows = rows, .x = x, .z = z, .data = data } },
+                .bytes_read = bytes_read,
+            };
+        }
+    };
+};
+
+pub const PlayChangeDifficultyPacket = struct {
+    difficulty: enum(u8) { peaceful, easy, normal, hard },
+    locked: bool,
+};
+
+pub const PlayPlayerAbilitiesPacket = struct {
+    flags: packed struct {
+        invulnerable: bool,
+        flying: bool,
+        allow_flying: bool,
+        instant_break: bool,
+    },
+    flying_speed: f32,
+    field_of_view_modifier: f32,
+};

@@ -123,7 +123,7 @@ fn pingPrint(parent_allocator: std.mem.Allocator, target: Target, diag: craft_io
 }
 
 const Target = struct {
-    protocol_version: i32 = 769,
+    protocol_version: i32 = 770,
     host: []const u8,
     port: u16 = 25565,
 };
@@ -154,13 +154,14 @@ fn ping(target: Target, arena_allocator: *std.heap.ArenaAllocator, diag: craft_i
         0x00,
         packets.StatusResponsePacket,
         arena_allocator,
+        diag,
     );
     // [tx]: Status Ping Packet :: 0x01
     const ping_at_ms = std.time.milliTimestamp();
     _ = try conn.writePacket(0x01, packets.StatusPingPongPacket{ .timestamp = ping_at_ms }, diag);
 
     // [rx]: Status Pong Packet : 0x01
-    const pong_packet = try conn.readAndExpectPacket(0x01, packets.StatusPingPongPacket, arena_allocator);
+    const pong_packet = try conn.readAndExpectPacket(0x01, packets.StatusPingPongPacket, arena_allocator, diag);
     const latency_ms: ?i64 = if (pong_packet.timestamp == ping_at_ms) std.time.milliTimestamp() - pong_packet.timestamp else null;
     return .{
         .status = status_response_packet.status,
@@ -202,10 +203,10 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
     }, diag);
 
     login_state: while (true) {
-        const login_packet = try conn.readPacket();
+        const login_packet = try conn.readPacket(diag);
         switch (login_packet.id) {
             0x00 => {
-                const disconnect_packet = try login_packet.decodeAs(packets.DisconnectPacket, &arena_allocator);
+                const disconnect_packet = try login_packet.decodeAs(packets.DisconnectPacket, &arena_allocator, diag);
                 defer _ = arena_allocator.reset(.retain_capacity);
 
                 std.debug.print("disconnected from {s} ---> {s}\n", .{ target.host, disconnect_packet.reason });
@@ -213,7 +214,7 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
             },
             0x01 => {
                 // encryption request
-                const encryption_request_packet = try login_packet.decodeAs(packets.EncryptionRequestPacket, &arena_allocator);
+                const encryption_request_packet = try login_packet.decodeAs(packets.EncryptionRequestPacket, &arena_allocator, diag);
                 defer _ = arena_allocator.reset(.retain_capacity);
 
                 log.warn("encryption requested ({}) but not supported", .{encryption_request_packet});
@@ -231,7 +232,7 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
             },
             0x03 => {
                 // set compression
-                const set_compression_packet = try login_packet.decodeAs(packets.SetCompressionPacket, &arena_allocator);
+                const set_compression_packet = try login_packet.decodeAs(packets.SetCompressionPacket, &arena_allocator, diag);
                 defer _ = arena_allocator.reset(.retain_capacity);
 
                 try conn.setCompressionThreshold(@intCast(set_compression_packet.threshold));
@@ -247,7 +248,7 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
                 //
                 // so that's what I'm going to do... send empty LoginPluginResponsePacket
 
-                const ping_request_packet = try login_packet.decodeAs(packets.LoginPluginRequestPacket, &arena_allocator);
+                const ping_request_packet = try login_packet.decodeAs(packets.LoginPluginRequestPacket, &arena_allocator, diag);
                 defer _ = arena_allocator.reset(.retain_capacity);
 
                 // login plugin response = 0x02
@@ -260,7 +261,7 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
                 // cookie request
                 // we don't have cookie storage yet, so let's just send back an empty cookie packet
 
-                const cookie_request_packet = try login_packet.decodeAs(packets.CookieRequestPacket, &arena_allocator);
+                const cookie_request_packet = try login_packet.decodeAs(packets.CookieRequestPacket, &arena_allocator, diag);
                 defer _ = arena_allocator.reset(.retain_capacity);
 
                 _ = try conn.writePacket(0x04, packets.CookieResponsePacket{
@@ -304,11 +305,11 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
     }, diag);
 
     configuration_state: while (true) {
-        const configuration_packet = try conn.readPacket();
+        const configuration_packet = try conn.readPacket(diag);
         switch (configuration_packet.id) {
             0x00 => {
                 // cookie request
-                const cookie_request_packet = try configuration_packet.decodeAs(packets.CookieRequestPacket, &arena_allocator);
+                const cookie_request_packet = try configuration_packet.decodeAs(packets.CookieRequestPacket, &arena_allocator, diag);
                 defer _ = arena_allocator.reset(.retain_capacity);
 
                 _ = try conn.writePacket(0x01, packets.CookieResponsePacket{
@@ -319,7 +320,7 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
             0x01 => {}, // plugin message, skip
             0x02 => {
                 // disconnect
-                const disconnect_packet = try configuration_packet.decodeAs(packets.DisconnectPacket, &arena_allocator);
+                const disconnect_packet = try configuration_packet.decodeAs(packets.DisconnectPacket, &arena_allocator, diag);
                 defer _ = arena_allocator.reset(.retain_capacity);
 
                 log.err("disconnected from {s} --> {s}", .{ target.host, disconnect_packet.reason });
@@ -332,21 +333,21 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
             },
             0x04 => {
                 // client bound keep-alive
-                const keep_alive_packet = try configuration_packet.decodeAs(packets.KeepAlivePacket, &arena_allocator);
+                const keep_alive_packet = try configuration_packet.decodeAs(packets.KeepAlivePacket, &arena_allocator, diag);
                 defer _ = arena_allocator.reset(.retain_capacity);
 
                 _ = try conn.writePacket(0x04, keep_alive_packet, diag);
             },
             0x05 => {
                 // ping packet
-                const ping_packet = try configuration_packet.decodeAs(packets.ConfigPingPacket, &arena_allocator);
+                const ping_packet = try configuration_packet.decodeAs(packets.ConfigPingPacket, &arena_allocator, diag);
                 defer _ = arena_allocator.reset(.retain_capacity);
 
                 _ = try conn.writePacket(0x05, ping_packet, diag);
             },
             0x06 => {}, // reset chat, do nothing
             0x07 => {
-                const registry_data_packet = try configuration_packet.decodeAs(packets.ConfigRegistryDataPacket, &arena_allocator);
+                const registry_data_packet = try configuration_packet.decodeAs(packets.ConfigRegistryDataPacket, &arena_allocator, diag);
                 defer _ = arena_allocator.reset(.retain_capacity);
 
                 for (registry_data_packet.entries) |registry_entry| {
@@ -356,7 +357,7 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
             0x08 => {}, // remove resource pack, do nothing
             0x09 => {
                 // add resource pack
-                const add_resource_pack_packet = try configuration_packet.decodeAs(packets.ConfigAddResourcePackPacket, &arena_allocator);
+                const add_resource_pack_packet = try configuration_packet.decodeAs(packets.ConfigAddResourcePackPacket, &arena_allocator, diag);
                 defer _ = arena_allocator.reset(.retain_capacity);
 
                 log.debug("add_resource_pack: id={}, url={s}, hash={s}, forced={any}, prompt_msg={?}", .{
@@ -376,7 +377,7 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
             0x0B => {}, // transfer, not implemented
             0x0C => {
                 // feature flags
-                const feature_flags_packet = try configuration_packet.decodeAs(packets.ConfigFeatureFlagsPacket, &arena_allocator);
+                const feature_flags_packet = try configuration_packet.decodeAs(packets.ConfigFeatureFlagsPacket, &arena_allocator, diag);
                 defer _ = arena_allocator.reset(.retain_capacity);
 
                 for (feature_flags_packet.feature_flags) |feature_flag| {
@@ -385,7 +386,7 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
             },
             0x0D => {
                 // update tags
-                const update_tags_packet = try configuration_packet.decodeAs(packets.ConfigUpdateTagsPacket, &arena_allocator);
+                const update_tags_packet = try configuration_packet.decodeAs(packets.ConfigUpdateTagsPacket, &arena_allocator, diag);
                 defer _ = arena_allocator.reset(.retain_capacity);
 
                 for (update_tags_packet.registry_tags) |tags| {
@@ -396,7 +397,7 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
             },
             0x0E => {
                 // clientbound known packs
-                const known_packs_packet = try configuration_packet.decodeAs(packets.ConfigKnownPacksPacket, &arena_allocator);
+                const known_packs_packet = try configuration_packet.decodeAs(packets.ConfigKnownPacksPacket, &arena_allocator, diag);
                 defer _ = arena_allocator.reset(.retain_capacity);
 
                 var sb_known_packs = std.ArrayList(packets.ConfigKnownPacksPacket.KnownPack).init(arena_allocator.allocator());
@@ -429,10 +430,46 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
     }
 
     log.debug("switched to play state", .{});
+    while (true) {
+        const play_packet = try conn.readPacket(diag);
+        switch (play_packet.id) {
+            0x0A => {
+                const change_difficulty_packet = try play_packet.decodeAs(packets.PlayChangeDifficultyPacket, &arena_allocator, diag);
+                defer _ = arena_allocator.reset(.retain_capacity);
 
-    // now we're in configuration state
-    // but we don't have any of those packets, so return error
-    return error.PlayState;
+                log.debug("change difficulty to -> {any} (locked? {any})", .{ change_difficulty_packet.difficulty, change_difficulty_packet.locked });
+            },
+            0x2C => {
+                const map_data = try play_packet.decodeAs(packets.PlayMapDataPacket, &arena_allocator, diag);
+                defer _ = arena_allocator.reset(.retain_capacity);
+
+                log.debug("map data (play): {any}", .{map_data});
+            },
+            0x2B => {
+                const login_packet = try play_packet.decodeAs(packets.PlayLoginPacket, &arena_allocator, diag);
+                defer _ = arena_allocator.reset(.retain_capacity);
+
+                log.debug("login (play) info: {any}", .{login_packet});
+            },
+            0x39 => {
+                const player_abilities_packet = try play_packet.decodeAs(packets.PlayPlayerAbilitiesPacket, &arena_allocator, diag);
+                defer _ = arena_allocator.reset(.retain_capacity);
+
+                log.debug("player abilities set -> {any}", .{player_abilities_packet});
+            },
+            else => {
+                diag.report(
+                    error.BadPacketId,
+                    "packet",
+                    "bad packet id in play state: 0x{X:02}",
+                    .{@as(u32, @intCast(play_packet.id))},
+                );
+                return error.BadPacketId;
+            },
+        }
+    }
+
+    unreachable;
 }
 
 fn dumpDiagReports(diag_state: *const craft_io.Diag.State) void {

@@ -58,11 +58,17 @@ pub const ReadPkt = struct {
     const Self = @This();
 
     // if you call this, we decode the packet into owned memory (call deinit() on the returned T)
-    pub fn decodeAs(self: Self, comptime T: type, arena_allocator: *std.heap.ArenaAllocator) !T {
+    pub fn decodeAs(self: Self, comptime T: type, arena_allocator: *std.heap.ArenaAllocator, diag: craft_io.Diag) !T {
         const encoding = comptime defaultPacketEncoding(T);
         var stream = std.io.fixedBufferStream(self.payload);
         var counting_stream = std.io.countingReader(stream.reader());
-        const decoded: craft_io.Decoded(T) = try craft_io.decode(T, counting_stream.reader(), arena_allocator, encoding);
+        const decoded: craft_io.Decoded(T) = try craft_io.decode(
+            T,
+            counting_stream.reader(),
+            arena_allocator,
+            try diag.child(.packet_body),
+            encoding,
+        );
         const expected_len = self.payload.len;
         const actual_bytes_decoded: usize = @intCast(counting_stream.bytes_read);
         if (decoded.bytes_read != expected_len) {
@@ -80,11 +86,11 @@ pub const ReadPkt = struct {
         return decoded.value;
     }
 
-    pub fn decodeWithoutArena(self: Self, comptime T: type, allocator: std.mem.Allocator) !OwnedPacket(T) {
+    pub fn decodeWithoutArena(self: Self, comptime T: type, allocator: std.mem.Allocator, diag: craft_io.Diag) !OwnedPacket(T) {
         const arena_allocator = try allocator.create(std.heap.ArenaAllocator);
         arena_allocator.* = .init(allocator);
 
-        const packet = try self.decodeAs(T, arena_allocator);
+        const packet = try self.decodeAs(T, arena_allocator, diag);
         return .{ .packet = packet, .arena = arena_allocator };
     }
 };
@@ -100,29 +106,34 @@ pub fn OwnedPacket(comptime Payload: type) type {
     };
 }
 
-pub fn readAndExpectPacket(conn: *Conn, expected_id: i32, comptime Packet: type, arena_allocator: *std.heap.ArenaAllocator) !Packet {
-    const next_packet = try conn.readPacket();
+pub fn readAndExpectPacket(conn: *Conn, expected_id: i32, comptime Packet: type, arena_allocator: *std.heap.ArenaAllocator, diag: craft_io.Diag) !Packet {
+    const next_packet = try conn.readPacket(diag);
     if (next_packet.id != expected_id) {
         return error.UnexpectedPacket;
     }
 
-    return try next_packet.decodeAs(Packet, arena_allocator);
+    return try next_packet.decodeAs(Packet, arena_allocator, diag);
 }
 
-pub fn readPacket(conn: *Conn) !ReadPkt {
+pub fn readPacket(conn: *Conn, diag: craft_io.Diag) !ReadPkt {
     const conn_reader = conn.reader.reader();
     if (conn.encryption) |*encryption| {
-        return conn.readPacketFrom(encryption.rx.reader(conn_reader));
+        return conn.readPacketFrom(encryption.rx.reader(conn_reader), diag);
     } else {
-        return conn.readPacketFrom(conn_reader);
+        return conn.readPacketFrom(conn_reader, diag);
     }
 }
 
-fn readPacketFrom(conn: *Conn, reader: anytype) !ReadPkt {
+fn readPacketFrom(conn: *Conn, reader: anytype, diag: craft_io.Diag) !ReadPkt {
     conn.clearBuffers();
 
     // decode the packet length, which is always uncompressed
-    const pkt_length_decoded = try craft_io.decodeInt(i32, reader, .varnum);
+    const pkt_length_decoded = try craft_io.decodeInt(
+        i32,
+        reader,
+        try diag.child(.packet_length),
+        .varnum,
+    );
     const pkt_length: usize = @intCast(pkt_length_decoded.value);
     // start tracking how many bytes we read off the wire, and how many bytes are left
     var bytes_read = pkt_length_decoded.bytes_read;
@@ -138,7 +149,12 @@ fn readPacketFrom(conn: *Conn, reader: anytype) !ReadPkt {
 
     if (conn.compression != null) {
         // if compression is enabled, then we must decode the data length (uncompressed)
-        const data_length_decoded = try craft_io.decodeInt(i32, counting_reader, .varnum);
+        const data_length_decoded = try craft_io.decodeInt(
+            i32,
+            counting_reader,
+            try diag.child(.packet_data_length),
+            .varnum,
+        );
         const data_length: usize = @intCast(data_length_decoded.value);
         bytes_read += data_length_decoded.bytes_read;
         bytes_left -= data_length_decoded.bytes_read;
@@ -155,7 +171,7 @@ fn readPacketFrom(conn: *Conn, reader: anytype) !ReadPkt {
                 .{ conn, data_length, bytes_left, bytes_read },
             );
             // read the id + payload out of the decompress reader
-            pkt = try conn.readPacketWithLengthFrom(decompress_reader, data_length, bytes_read);
+            pkt = try conn.readPacketWithLengthFrom(decompress_reader, diag, data_length, bytes_read);
             did_read_pkt = true;
         } else {
             // if data_length is 0, then the packet is not compressed, and the expected length is pkt_length - 1 (1 byte for 0 data length)
@@ -169,7 +185,7 @@ fn readPacketFrom(conn: *Conn, reader: anytype) !ReadPkt {
     // did_read_pkt = true when compression is enabled and the packet exceeds the threshold (and was decompressed)
     // so if did_read_pkt == false, then we should read the uncompressed packet data from the reader
     if (!did_read_pkt) {
-        pkt = try conn.readPacketWithLengthFrom(counting_reader, bytes_left, bytes_read);
+        pkt = try conn.readPacketWithLengthFrom(counting_reader, diag, bytes_left, bytes_read);
     }
 
     // now check if we read all the bytes we were supposed to
@@ -190,14 +206,14 @@ fn readPacketFrom(conn: *Conn, reader: anytype) !ReadPkt {
     return pkt;
 }
 
-fn readPacketWithLengthFrom(conn: *Conn, reader: anytype, size: usize, bytes_already_read: usize) !ReadPkt {
+fn readPacketWithLengthFrom(conn: *Conn, reader: anytype, diag: craft_io.Diag, size: usize, bytes_already_read: usize) !ReadPkt {
     var bytes_decoded = bytes_already_read;
     const id_and_payload = try conn.buf.addManyAsSlice(size);
     try reader.readNoEof(id_and_payload);
     bytes_decoded += size;
 
     var id_payload_stream = std.io.fixedBufferStream(id_and_payload);
-    const id_decoded = try craft_io.decodeInt(i32, id_payload_stream.reader(), .varnum);
+    const id_decoded = try craft_io.decodeInt(i32, id_payload_stream.reader(), try diag.child(.packet_id), .varnum);
     const id = id_decoded.value;
     const payload = id_and_payload[id_decoded.bytes_read..]; // skip the bytes for the ID
 
