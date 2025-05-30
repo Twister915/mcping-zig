@@ -270,6 +270,7 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
                 }, diag);
             },
             else => {
+                @branchHint(.cold);
                 diag.report(
                     error.BadPacketId,
                     "packet",
@@ -418,6 +419,7 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
             0x0F => {}, // custom report details, not implemented
             0x10 => {}, // server links, not implemented
             else => {
+                @branchHint(.cold);
                 diag.report(
                     error.BadPacketId,
                     "packet",

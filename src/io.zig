@@ -622,6 +622,7 @@ fn encodePointerInner(
             // sometimes, an array such as *[1024]T will be converted to a slice []T. In those cases
             if (@hasField(@TypeOf(encoding), "max_items")) {
                 if (slice.len > encoding.max_items) {
+                    @branchHint(.unlikely);
                     diag.report(
                         error.PacketTooBig,
                         @typeName(P),
@@ -851,6 +852,7 @@ fn decodeVarnum(comptime VarNum: type, reader: anytype, diag: Diag) !Decoded(Var
         if ((b & 0x80) == 0) {
             return .{ .bytes_read = bytes, .value = decoded };
         } else if (bytes >= MAX_BYTES) {
+            @branchHint(.unlikely);
             diag.report(error.VarNumTooLong, @typeName(VarNum), "too many bytes while decoding var num", .{});
             return error.VarNumTooLong;
         }
@@ -864,6 +866,7 @@ fn decodeBool(reader: anytype, diag: Diag) !Decoded(bool) {
             0x00 => false,
             0x01 => true,
             else => |other| {
+                @branchHint(.unlikely);
                 diag.report(error.UnexpectedBoolByte, "bool", "bad bool value 0x{X:0>2}", .{other});
                 return error.UnexpectedBoolByte;
             },
@@ -926,6 +929,13 @@ fn decodePointer(
                                 )).unwrap(&bytes_read),
                             );
                             if (count_dcd != N) {
+                                @branchHint(.unlikely);
+                                diag.report(
+                                    error.ExactSizedArrayBadLengthPrefix,
+                                    @typeName(Data),
+                                    "decoded length prefix {d} but expected exact size {d}",
+                                    .{ count_dcd, N },
+                                );
                                 return error.ExactSizedArrayBadLengthPrefix;
                             }
                         },
@@ -998,6 +1008,7 @@ fn decodePointer(
                         lp.encoding,
                     )).unwrap(&bytes));
                     if (count > encoding.max_items) {
+                        @branchHint(.unlikely);
                         diag.report(
                             error.PacketTooBig,
                             @typeName(Data),
@@ -1009,9 +1020,9 @@ fn decodePointer(
 
                     // use allocator to allocate a slice
                     if (Ptr.size == .many) {
-                        if (Ptr.sentinel_ptr == null) {
+                        comptime if (Ptr.sentinel_ptr == null) {
                             @compileError("cannot decode a many pointer without a sentinel, " ++ @typeName(Data) ++ " is not supported.");
-                        }
+                        };
 
                         const sentinel_value = Ptr.sentinel();
                         dst = try allocator.allocSentinel(Payload, count, sentinel_value);
@@ -1149,6 +1160,7 @@ fn decodeArray(
             )).unwrap(&bytes);
 
             if (@as(usize, @intCast(c)) != array_info.len) {
+                @branchHint(.cold);
                 diag.report(
                     error.DecodeWrongSizedArray,
                     @typeName(Data),
