@@ -4,14 +4,14 @@ const craft_io = @import("io.zig");
 const cfb8 = @import("cfb8.zig");
 
 const BUF_SIZE = 256;
-const bufReader = std.io.BufferedReader(BUF_SIZE, net.Stream.Reader);
+const BufReader = std.io.BufferedReader(BUF_SIZE, net.Stream.Reader);
 
 const log = std.log.scoped(.craft_conn);
 
 socket: net.Stream,
 address: []const u8,
 port: u16,
-reader: bufReader,
+reader: BufReader,
 buf: std.ArrayList(u8),
 compression: ?Compression = null,
 encryption: ?Encryption = null,
