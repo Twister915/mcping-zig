@@ -244,7 +244,7 @@ pub fn writePacketWithEncoding(
     );
     const data_length = payload_length + id_length;
     const buf_writer = conn.buf.writer();
-    var bytes_to_write: []const u8 = undefined;
+    var bytes_to_write: []u8 = undefined;
     if (conn.compression) |*comp| {
         // compression is enabled
         if (data_length > comp.threshold) {
@@ -375,6 +375,10 @@ pub fn writePacketWithEncoding(
             encoding,
         );
         bytes_to_write = conn.buf.items;
+    }
+
+    if (conn.encryption) |*encryption| {
+        encryption.tx.encrypt(bytes_to_write);
     }
 
     // send the prepared bytes over the socket
