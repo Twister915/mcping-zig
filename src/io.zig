@@ -6,16 +6,37 @@ pub fn encode(
     data: anytype,
     writer: anytype,
     allocator: std.mem.Allocator,
+    diag: Diag,
     comptime encoding: Encoding(@TypeOf(data)),
 ) !usize {
     const Data = @TypeOf(data);
     if (std.meta.hasFn(Data, "craftEncode")) {
-        return data.craftEncode(writer, allocator, encoding);
+        return data.craftEncode(writer, allocator, diag, encoding);
+    }
+
+    const data_info = @typeInfo(Data);
+    if (data_info == .int) {
+        const ByteInt = std.math.ByteAlignedInt(Data);
+        if (ByteInt != Data) {
+            return encode(
+                @as(ByteInt, @intCast(data)),
+                writer,
+                allocator,
+                diag,
+                encoding,
+            );
+        }
     }
 
     const Enc: type = Encoding(Data);
     if (Enc == JsonEncoding) {
-        return encodeJson(data, writer, allocator, encoding);
+        return encodeJson(
+            data,
+            writer,
+            allocator,
+            diag,
+            encoding,
+        );
     }
 
     if (Data == u8) {
@@ -27,16 +48,16 @@ pub fn encode(
         return 0;
     }
 
-    return switch (@typeInfo(Data)) {
-        .int => encodeInt(data, writer, encoding),
-        .bool => encode(@as(u8, if (data) 1 else 0), writer, allocator, {}),
+    return switch (data_info) {
+        .int => encodeInt(data, writer, diag, encoding),
+        .bool => encode(@as(u8, if (data) 1 else 0), writer, allocator, diag, {}),
         .float => encodeFloat(data, writer),
-        .pointer => encodePointer(data, writer, allocator, encoding),
-        .@"struct" => encodeStruct(data, writer, allocator, encoding),
-        .array => encodeArray(data, writer, allocator, encoding),
-        .optional => encodeOptional(data, writer, allocator, encoding),
-        .@"enum" => encodeEnum(data, writer, allocator, encoding),
-        .@"union" => encodeUnion(data, writer, allocator, encoding),
+        .pointer => encodePointer(data, writer, allocator, diag, encoding),
+        .@"struct" => encodeStruct(data, writer, allocator, diag, encoding),
+        .array => encodeArray(data, writer, allocator, diag, encoding),
+        .optional => encodeOptional(data, writer, allocator, diag, encoding),
+        .@"enum" => encodeEnum(data, writer, allocator, diag, encoding),
+        .@"union" => encodeUnion(data, writer, allocator, diag, encoding),
         else => @compileError(@typeName(Data) ++ " cannot be craft encoded"),
     };
 }
@@ -49,6 +70,15 @@ pub fn decode(
 ) !Decoded(Data) {
     if (std.meta.hasFn(Data, "craftDecode")) {
         return Data.craftDecode(reader, allocator, encoding);
+    }
+
+    const data_info = @typeInfo(Data);
+    if (data_info == .int) {
+        const ByteInt = std.math.ByteAlignedInt(Data);
+        if (ByteInt != Data) {
+            const decoded = try decode(ByteInt, reader, allocator, encoding);
+            return .{ .value = @as(Data, @intCast(decoded.value)), .bytes_read = decoded.bytes_read };
+        }
     }
 
     const Enc: type = Encoding(Data);
@@ -67,7 +97,7 @@ pub fn decode(
         return .{ .bytes_read = 0, .value = {} };
     }
 
-    return switch (@typeInfo(Data)) {
+    return switch (data_info) {
         .int => decodeInt(Data, reader, encoding),
         .bool => decodeBool(reader),
         .float => decodeFloat(Data, reader),
@@ -84,46 +114,13 @@ pub fn decode(
 pub fn length(
     data: anytype,
     allocator: std.mem.Allocator,
+    diag: Diag,
     comptime encoding: Encoding(@TypeOf(data)),
 ) !usize {
-    const Data = @TypeOf(data);
-    switch (@typeInfo(Data)) {
-        .@"struct", .@"enum", .@"union" => {
-            if (@hasDecl(Data, "CRAFT_LENGTH")) {
-                return Data.CRAFT_LENGTH;
-            }
-        },
-        else => {},
-    }
-
-    if (std.meta.hasFn(Data, "craftLength")) {
-        return Data.craftLength(data, allocator, encoding);
-    }
-
-    const Enc: type = Encoding(Data);
-    if (Enc == JsonEncoding) {
-        return lengthJson(Data, allocator, encoding);
-    }
-
-    if (Data == u8) {
-        return 1;
-    }
-
-    if (@sizeOf(Data) == 0) {
-        return 0;
-    }
-
-    return switch (@typeInfo(Data)) {
-        .int => lengthInt(data, encoding),
-        .bool, .float => @sizeOf(Data),
-        .pointer => lengthPointer(data, allocator, encoding),
-        .@"struct" => lengthStruct(data, allocator, encoding),
-        .array => lengthArray(data, allocator, encoding),
-        .optional => lengthOptional(data, allocator, encoding),
-        .@"enum" => lengthEnum(data, allocator, encoding),
-        .@"union" => lengthUnion(data, allocator, encoding),
-        else => @compileError(@typeName(Data) ++ " is not supported by craft encoding / decoding"),
-    };
+    var counting_writer = std.io.countingWriter(std.io.null_writer);
+    const encode_reported_bytes = try encode(data, counting_writer.writer(), allocator, diag, encoding);
+    std.debug.assert(counting_writer.bytes_written == encode_reported_bytes);
+    return encode_reported_bytes;
 }
 
 pub const IntEncoding = enum {
@@ -142,7 +139,16 @@ pub fn Encoding(comptime Payload: type) type {
         return void;
     }
 
-    switch (@typeInfo(Payload)) {
+    const payload_info = @typeInfo(Payload);
+
+    if (payload_info == .int) {
+        const ByteAligned = std.math.ByteAlignedInt(Payload);
+        if (ByteAligned != Payload) {
+            return Encoding(ByteAligned);
+        }
+    }
+
+    switch (payload_info) {
         .@"struct", .@"union", .@"enum" => {
             if (@hasDecl(Payload, "CraftEncoding")) {
                 return Payload.CraftEncoding;
@@ -151,7 +157,7 @@ pub fn Encoding(comptime Payload: type) type {
         else => {},
     }
 
-    return switch (@typeInfo(Payload)) {
+    return switch (payload_info) {
         .int => IntEncoding,
         .bool, .void, .float => void,
         .@"struct" => StructEncoding(Payload),
@@ -183,14 +189,32 @@ pub fn defaultEncoding(comptime Payload: type) Encoding(Payload) {
     return switch (type_info) {
         .int => IntEncoding.default,
         .@"enum" => defaultEncoding(WireTagFor(Payload)),
-        .@"struct", .@"union", .pointer, .optional, .array => .{},
+        .@"struct" => |struct_info| {
+            if (struct_info.backing_integer) |BackingInteger| {
+                return .{ .as_int = defaultEncoding(BackingInteger) };
+            } else {
+                return .{};
+            }
+        },
+        .@"union", .pointer, .optional, .array => .{},
         else => @compileError("no default encoding computable for " ++ @typeName(Payload)),
     };
 }
 
 fn StructEncoding(comptime Struct: type) type {
     const struct_info = @typeInfo(Struct).@"struct";
+    if (struct_info.backing_integer) |BackingInteger| {
+        return union(enum) {
+            by_fields: StructByFieldsEncoding(Struct),
+            as_int: Encoding(BackingInteger),
+        };
+    } else {
+        return StructByFieldsEncoding(Struct);
+    }
+}
 
+fn StructByFieldsEncoding(comptime Struct: type) type {
+    const struct_info = @typeInfo(Struct).@"struct";
     comptime var encoding_fields: [struct_info.fields.len]std.builtin.Type.StructField = undefined;
     for (struct_info.fields, &encoding_fields) |struct_field, *encoding_field| {
         const StructFieldEncoding = Encoding(struct_field.type);
@@ -214,11 +238,6 @@ fn StructEncoding(comptime Struct: type) type {
     return @Type(EncodingStruct);
 }
 
-pub const LengthEncoding = struct {
-    max: comptime_int = MAX_PACKET_SIZE,
-    prefix: LengthPrefixMode = .{ .enabled = .{} },
-};
-
 pub const LengthPrefixMode = union(enum) {
     disabled,
     enabled: LengthPrefixEncoding,
@@ -236,8 +255,6 @@ pub const LengthPrefixEncoding = struct {
     }
 };
 
-pub const DEFAULT_LENGTH_ENCODING: LengthEncoding = .{};
-
 fn PointerEncoding(comptime P: type) type {
     const pointer_info = @typeInfo(P).pointer;
     switch (pointer_info.size) {
@@ -250,7 +267,8 @@ fn PointerEncoding(comptime P: type) type {
 
             const ItemsEncoding = Encoding(pointer_info.child);
             return struct {
-                length: LengthEncoding = DEFAULT_LENGTH_ENCODING,
+                max_items: comptime_int = MAX_PACKET_SIZE,
+                length: LengthPrefixMode = .{ .enabled = .{} },
                 items: ItemsEncoding = defaultEncoding(pointer_info.child),
             };
         },
@@ -309,6 +327,7 @@ fn EnumEncoding(comptime E: type) type {
 fn encodeInt(
     data: anytype,
     writer: anytype,
+    diag: Diag,
     comptime encoding: Encoding(@TypeOf(data)),
 ) !usize {
     const Int = @TypeOf(data);
@@ -317,12 +336,15 @@ fn encodeInt(
         // for an int type such as u16, i16, u32, i32, etc... let's just write it as big endian on the wire
         .default => {
             const NUM_BITS = comptime @bitSizeOf(Int);
-            const BYTES = comptime std.math.divExact(usize, NUM_BITS, 8) catch @compileError(@typeName(Int) ++ " is not byte sized (divisible by 8), cannot encode");
-            try writer.writeInt(Int, data, .big);
+            const BYTES = comptime std.math.divCeil(usize, NUM_BITS, 8) catch unreachable;
+            writer.writeInt(Int, data, .big) catch |err| {
+                diag.report(err, @typeName(Int), "failed to encode as regular int", .{});
+                return err;
+            };
             return BYTES;
         },
         // for a VarInt / VarLong as defined in the protocol
-        .varnum => return encodeVarnum(data, writer),
+        .varnum => return encodeVarnum(data, writer, diag),
     }
 }
 
@@ -342,7 +364,7 @@ test "encode i16 .default" {
         var array_list = std.ArrayList(u8).init(std.testing.allocator);
         defer array_list.deinit();
 
-        const bytes = try encode(test_case.input, array_list.writer(), .default);
+        const bytes = try encode(test_case.input, array_list.writer(), std.testing.allocator, .{}, .default);
         try std.testing.expectEqual(2, bytes);
         try std.testing.expectEqualSlices(u8, &test_case.expected, array_list.items);
     }
@@ -365,14 +387,14 @@ test "encode i32 .default" {
         var array_list = std.ArrayList(u8).init(std.testing.allocator);
         defer array_list.deinit();
 
-        const bytes = try encode(test_case.input, array_list.writer(), .default);
+        const bytes = try encode(test_case.input, array_list.writer(), std.testing.allocator, .{}, .default);
         try std.testing.expectEqual(4, bytes);
         try std.testing.expectEqualSlices(u8, &test_case.expected, array_list.items);
     }
 }
 
 // "var num" such as VarInt, VarLong
-fn encodeVarnum(data: anytype, writer: anytype) !usize {
+fn encodeVarnum(data: anytype, writer: anytype, diag: Diag) !usize {
     const IntType = @TypeOf(data);
     const UIntType = UnsignedIntEquiv(IntType);
     const MAX_BYTES = comptime std.math.divCeil(usize, @bitSizeOf(IntType), 7) catch unreachable;
@@ -393,6 +415,12 @@ fn encodeVarnum(data: anytype, writer: anytype) !usize {
         }
     }
 
+    diag.report(
+        error.VarNumTooLarge,
+        @typeName(IntType),
+        "var num exceeded max bytes {d} :: {any}",
+        .{ MAX_BYTES, data },
+    );
     return error.VarNumTooLarge;
 }
 
@@ -433,11 +461,24 @@ fn encodeOptional(
     data: anytype,
     writer: anytype,
     allocator: std.mem.Allocator,
+    diag: Diag,
     comptime encoding: Encoding(@TypeOf(data)),
 ) !usize {
-    return (try encode(data != null, writer, allocator, {})) +
+    return (try encode(
+        data != null,
+        writer,
+        allocator,
+        try diag.child(.optional_prefix),
+        {},
+    )) +
         (if (data) |payload|
-            try encode(payload, writer, allocator, encoding)
+            try encode(
+                payload,
+                writer,
+                allocator,
+                try diag.child(.payload),
+                encoding,
+            )
         else
             0);
 }
@@ -447,40 +488,102 @@ fn encodeStruct(
     data: anytype,
     writer: anytype,
     allocator: std.mem.Allocator,
+    diag: Diag,
     comptime encoding: Encoding(@TypeOf(data)),
 ) !usize {
     const Struct = @TypeOf(data);
     const struct_info = @typeInfo(Struct).@"struct";
+    if (struct_info.backing_integer) |BackingInt| {
+        switch (encoding) {
+            .as_int => |int_encoding| return encode(
+                @as(BackingInt, @bitCast(data)),
+                writer,
+                allocator,
+                diag,
+                int_encoding,
+            ),
+            .by_fields => |fields_encoding| return encodeStructByFields(
+                data,
+                writer,
+                allocator,
+                diag,
+                fields_encoding,
+            ),
+        }
+    } else {
+        return encodeStructByFields(
+            data,
+            writer,
+            allocator,
+            diag,
+            encoding,
+        );
+    }
+}
+
+fn encodeStructByFields(
+    data: anytype,
+    writer: anytype,
+    allocator: std.mem.Allocator,
+    diag: Diag,
+    comptime encoding: StructByFieldsEncoding(@TypeOf(data)),
+) !usize {
+    const Struct = @TypeOf(data);
+    const struct_info = @typeInfo(Struct).@"struct";
+
     var bytes: usize = 0;
     inline for (struct_info.fields) |struct_field| {
         const field_data = @field(data, struct_field.name);
         const field_encoding = @field(encoding, struct_field.name);
-        bytes += try encode(field_data, writer, allocator, field_encoding);
+        bytes += try encode(
+            field_data,
+            writer,
+            allocator,
+            try diag.child(.{
+                .field = struct_field.name,
+            }),
+            field_encoding,
+        );
     }
     return bytes;
 }
 
+// type safe variant of encodePointerInner
 fn encodePointer(
     data: anytype,
     writer: anytype,
     allocator: std.mem.Allocator,
+    diag: Diag,
     comptime encoding: Encoding(@TypeOf(data)),
+) !usize {
+    return encodePointerInner(data, writer, allocator, diag, encoding);
+}
+
+// slightly less type safe variant of encodePointer, which allows encoding to not conform to Encoding(@TypeOf(data))
+fn encodePointerInner(
+    data: anytype,
+    writer: anytype,
+    allocator: std.mem.Allocator,
+    diag: Diag,
+    comptime encoding: anytype,
 ) !usize {
     const P = @TypeOf(data);
     const ptr_info = @typeInfo(P).pointer;
 
     switch (ptr_info.size) {
         .one => {
-            switch (@typeInfo(ptr_info.child)) {
-                .array => {
+            const Payload: type = ptr_info.child;
+            const payload_info = @typeInfo(Payload);
+            switch (payload_info) {
+                .array => |array_info| {
                     // *[N]T, can become []const T
-                    const Elem: type = std.meta.Elem(ptr_info.child);
-                    const ConstSlice: type = []const Elem;
-                    return encode(@as(ConstSlice, data), writer, allocator, encoding);
+                    const ArrayPayload = array_info.child;
+                    const ConstSlice: type = []const ArrayPayload;
+                    return encodePointerInner(@as(ConstSlice, data), writer, allocator, diag, encoding);
                 },
                 else => {
                     // *T
-                    return encode(data.*, writer, allocator, encoding);
+                    return encode(data.*, writer, allocator, diag, encoding);
                 },
             }
         },
@@ -506,18 +609,26 @@ fn encodePointer(
 
             var bytes: usize = 0;
             // dealing with length
-            const len_encoding: LengthEncoding = encoding.length;
-            switch (len_encoding.prefix) {
+            switch (encoding.length) {
                 .enabled => |lp| {
                     const Counter = lp.Counter();
                     const counter: Counter = @as(Counter, @intCast(slice.len));
-                    bytes += try encode(counter, writer, allocator, lp.encoding);
+                    bytes += try encode(counter, writer, allocator, try diag.child(.length_prefix), lp.encoding);
                 },
                 else => {},
             }
 
-            if (slice.len > len_encoding.max) {
-                return error.PacketTooBig;
+            // sometimes, an array such as *[1024]T will be converted to a slice []T. In those cases
+            if (@hasField(@TypeOf(encoding), "max_items")) {
+                if (slice.len > encoding.max_items) {
+                    diag.report(
+                        error.PacketTooBig,
+                        @typeName(P),
+                        "items {d} exceed configured maximum {d}",
+                        .{ slice.len, encoding.max_items },
+                    );
+                    return error.PacketTooBig;
+                }
             }
 
             // []u8, []const u8, etc
@@ -526,8 +637,14 @@ fn encodePointer(
                 bytes += slice.len;
             } else {
                 // and now with either []T or []const T, we can iterate over the items and encode
-                for (slice) |item| {
-                    bytes += try encode(item, writer, allocator, encoding.items);
+                for (slice, 0..) |item, idx| {
+                    bytes += try encode(
+                        item,
+                        writer,
+                        allocator,
+                        try diag.child(.{ .index = idx }),
+                        encoding.items,
+                    );
                 }
             }
 
@@ -542,6 +659,7 @@ fn encodeArray(
     data: anytype,
     writer: anytype,
     allocator: std.mem.Allocator,
+    diag: Diag,
     comptime encoding: Encoding(@TypeOf(data)),
 ) !usize {
     const Array: type = @TypeOf(data);
@@ -551,7 +669,13 @@ fn encodeArray(
         .enabled => |lp| {
             const C: type = lp.Counter();
             const counter: C = @as(C, @intCast(array_info.len));
-            bytes += try encode(counter, writer, allocator, lp.encoding);
+            bytes += try encode(
+                counter,
+                writer,
+                allocator,
+                try diag.child(.length_prefix),
+                lp.encoding,
+            );
         },
         .disabled => {},
     }
@@ -563,7 +687,13 @@ fn encodeArray(
     } else {
         const item_encoding = encoding.items;
         inline for (0..array_info.len) |idx| {
-            bytes += try encode(data[idx], writer, item_encoding);
+            bytes += try encode(
+                data[idx],
+                writer,
+                allocator,
+                try diag.child(.{ .index = idx }),
+                item_encoding,
+            );
         }
     }
 
@@ -625,22 +755,27 @@ fn encodeEnum(
     data: anytype,
     writer: anytype,
     allocator: std.mem.Allocator,
+    diag: Diag,
     comptime encoding: Encoding(@TypeOf(data)),
 ) !usize {
-    return encode(getWireTag(data), writer, allocator, encoding);
+    return encode(getWireTag(data), writer, allocator, diag, encoding);
 }
 
 fn encodeUnion(
     data: anytype,
     writer: anytype,
     allocator: std.mem.Allocator,
+    diag: Diag,
     comptime encoding: Encoding(@TypeOf(data)),
 ) !usize {
     switch (data) {
         inline else => |d, tag| {
+            const tag_diag = try diag.child(.{
+                .field = @tagName(tag),
+            });
             var bytes: usize = 0;
-            bytes += try encode(tag, writer, allocator, encoding.tag);
-            bytes += try encode(d, writer, allocator, @field(encoding.fields, @tagName(tag)));
+            bytes += try encode(tag, writer, allocator, try tag_diag.child(.tag), encoding.tag);
+            bytes += try encode(d, writer, allocator, try tag_diag.child(.payload), @field(encoding.fields, @tagName(tag)));
             return bytes;
         },
     }
@@ -650,12 +785,21 @@ fn encodeJson(
     data: anytype,
     writer: anytype,
     allocator: std.mem.Allocator,
+    diag: Diag,
     comptime encoding: JsonEncoding,
 ) !usize {
     var buf = std.ArrayList(u8).init(allocator);
     defer buf.deinit();
 
-    try std.json.stringify(data, encoding.stringify_options, buf.writer());
+    std.json.stringify(data, encoding.stringify_options, buf.writer()) catch |err| {
+        diag.report(
+            error.FailedJsonEncode,
+            @typeName(@TypeOf(data)),
+            "failed to encode as JSON -> {any}",
+            .{err},
+        );
+        return error.FailedJsonEncode;
+    };
 
     return encode(buf.items, writer, allocator, encoding.string_encoding);
 }
@@ -683,7 +827,7 @@ pub fn decodeInt(
     switch (encoding) {
         .default => {
             const NUM_BITS = @bitSizeOf(Int);
-            const BYTES = comptime std.math.divExact(usize, NUM_BITS, 8) catch @compileError(@typeName(Int) ++ " is not byte sized (divisible by 8), cannot encode");
+            const BYTES = comptime std.math.divCeil(usize, NUM_BITS, 8) catch unreachable;
 
             const decoded: Int = try reader.readInt(Int, .big);
             return .{ .bytes_read = BYTES, .value = decoded };
@@ -694,7 +838,7 @@ pub fn decodeInt(
 
 fn decodeVarnum(comptime VarNum: type, reader: anytype) !Decoded(VarNum) {
     const BIT_SIZE = @bitSizeOf(VarNum);
-    const MAX_BYTES = std.math.divCeil(usize, BIT_SIZE, 7) catch unreachable;
+    const MAX_BYTES = comptime std.math.divCeil(usize, BIT_SIZE, 7) catch unreachable;
     var decoded: VarNum = 0;
     var bytes: usize = 0;
     while (true) {
@@ -755,24 +899,77 @@ fn decodePointer(
     const Payload = Ptr.child;
     switch (Ptr.size) {
         .one => {
-            // *T
-            const allocated_ptr: NonConstPointer(Data) = try allocator.create(Payload);
-            errdefer allocator.destroy(allocated_ptr);
+            const payload_info = @typeInfo(Payload);
+            switch (payload_info) {
+                .array => |array_info| {
+                    // this handles case *[N]Elem or *const [N]Elem
+                    const Elem = array_info.child;
+                    const N = array_info.len;
+                    var bytes_read: usize = 0;
+                    switch (encoding.length) {
+                        .enabled => |lp| {
+                            const Cnt = lp.Counter();
+                            const count_dcd: usize = @intCast(
+                                (try decode(
+                                    Cnt,
+                                    reader,
+                                    allocator,
+                                    lp.encoding,
+                                )).unwrap(&bytes_read),
+                            );
+                            if (count_dcd != N) {
+                                return error.ExactSizedArrayBadLengthPrefix;
+                            }
+                        },
+                        .disabled => {},
+                    }
 
-            const decoded_payload = try decode(Payload, reader, allocator, encoding);
-            allocated_ptr.* = decoded_payload.value;
-            return .{ .bytes_read = decoded_payload.bytes_read, .value = allocated_ptr };
+                    // allocate [N]Elem on the heap
+                    const buf: []Elem = try allocator.alloc(Elem, N);
+                    errdefer allocator.free(buf);
+
+                    // if Elem is u8, then decode bytes directly
+                    if (Elem == u8) {
+                        try reader.readNoEof(buf);
+                        bytes_read += N;
+                    } else {
+                        // otherwise, decode each item individually
+                        const items_encoding = encoding.items;
+                        for (buf) |*target| {
+                            target.* = (try decode(
+                                Elem,
+                                reader,
+                                allocator,
+                                items_encoding,
+                            )).unwrap(&bytes_read);
+                        }
+                    }
+
+                    return .{
+                        .value = @ptrCast(buf),
+                        .bytes_read = bytes_read,
+                    };
+                },
+                else => {
+                    // other *T, not arrays
+                    const allocated_ptr: NonConstPointer(Data) = try allocator.create(Payload);
+                    errdefer allocator.destroy(allocated_ptr);
+
+                    const decoded_payload = try decode(Payload, reader, allocator, encoding);
+                    allocated_ptr.* = decoded_payload.value;
+                    return .{ .bytes_read = decoded_payload.bytes_read, .value = allocated_ptr };
+                },
+            }
         },
         .many, .slice => {
             var bytes: usize = 0;
             var dst: NonConstPointer(Data) = undefined;
 
-            const length_encoding: LengthEncoding = encoding.length;
-            switch (length_encoding.prefix) {
+            switch (encoding.length) {
                 .disabled => {
                     // read until reader runs dry
                     if (Payload == u8) {
-                        dst = reader.readAllAlloc(allocator, length_encoding.max) catch |err| switch (err) {
+                        dst = reader.readAllAlloc(allocator, encoding.max_items) catch |err| switch (err) {
                             error.StreamTooLong => return error.PacketTooBig,
                             else => return err,
                         };
@@ -786,7 +983,7 @@ fn decodePointer(
                     // decode the counter from the wire
                     const Counter = lp.Counter();
                     const count: usize = @intCast((try decodeInt(Counter, reader, lp.encoding)).unwrap(&bytes));
-                    if (count > length_encoding.max) {
+                    if (count > encoding.max_items) {
                         return error.PacketTooBig;
                     }
 
@@ -854,14 +1051,40 @@ fn decodeStruct(
     allocator: *std.heap.ArenaAllocator,
     comptime encoding: Encoding(Data),
 ) !Decoded(Data) {
-    const S = @typeInfo(Data).@"struct";
+    const struct_info = @typeInfo(Data).@"struct";
+    if (struct_info.backing_integer) |BackingInt| {
+        switch (encoding) {
+            .as_int => |int_encoding| {
+                const int_repr = try decode(BackingInt, reader, allocator, int_encoding);
+                const as_struct: Data = @bitCast(int_repr.value);
+                return .{
+                    .bytes_read = int_repr.bytes_read,
+                    .value = as_struct,
+                };
+            },
+            .by_fields => |fields_encoding| {
+                return decodeStructByFields(Data, reader, allocator, fields_encoding);
+            },
+        }
+    } else {
+        return decodeStructByFields(Data, reader, allocator, encoding);
+    }
+}
+
+fn decodeStructByFields(
+    comptime Data: type,
+    reader: anytype,
+    allocator: *std.heap.ArenaAllocator,
+    comptime encoding: StructByFieldsEncoding(Data),
+) !Decoded(Data) {
+    const struct_info = @typeInfo(Data).@"struct";
     var decoded_value: Data = undefined;
     var bytes: usize = 0;
 
-    inline for (S.fields) |Field| {
-        const field_encoding = @field(encoding, Field.name);
-        const field_dcd = try decode(Field.type, reader, allocator, field_encoding);
-        @field(decoded_value, Field.name) = field_dcd.unwrap(&bytes);
+    inline for (struct_info.fields) |struct_field| {
+        const field_encoding = @field(encoding, struct_field.name);
+        const field_dcd = try decode(struct_field.type, reader, allocator, field_encoding);
+        @field(decoded_value, struct_field.name) = field_dcd.unwrap(&bytes);
     }
 
     return .{
@@ -1063,149 +1286,13 @@ fn decodeJson(
     };
 }
 
-pub fn lengthInt(data: anytype, comptime encoding: IntEncoding) !usize {
+pub const MAX_VAR_INT_LENGTH = maxIntLength(i32, .varnum);
+
+pub fn maxIntLength(comptime Int: type, comptime encoding: IntEncoding) usize {
     return switch (encoding) {
-        .default => @sizeOf(@TypeOf(data)),
-        .varnum => @max(1, try std.math.divCeil(
-            usize,
-            @bitSizeOf(@TypeOf(data)) - @clz(data),
-            7,
-        )),
+        .default => @sizeOf(Int),
+        .varnum => std.math.divCeil(usize, @bitSizeOf(Int), 7) catch unreachable,
     };
-}
-
-fn lengthPointer(
-    data: anytype,
-    allocator: std.mem.Allocator,
-    comptime encoding: Encoding(@TypeOf(data)),
-) !usize {
-    const Data = @TypeOf(data);
-    const ptr_info = @typeInfo(Data).pointer;
-    var bytes: usize = 0;
-    switch (ptr_info.size) {
-        .one => {
-            bytes = try length(data.*, encoding);
-        },
-        .many, .slice => {
-            // [*]T, [*:senti]T, [:senti]T, []T
-            if (ptr_info.size == .many and ptr_info.sentinel() == null) {
-                @compileError("unsized non-sentinel slices are not supported");
-            }
-
-            // [*:senti]T, [:senti]T, []T
-            // .many     , .slice   , .slice
-            const slice = if (ptr_info.size == .many) std.mem.span(data) else data;
-            // slice is always []T now
-            const len_encoding: LengthEncoding = encoding.length;
-            const count: usize = slice.len;
-            switch (len_encoding.prefix) {
-                .enabled => |lp| {
-                    const Counter: type = lp.Counter();
-                    const c: Counter = @intCast(count);
-                    bytes += try lengthInt(c, lp.encoding);
-                },
-                .disabled => {},
-            }
-
-            if (ptr_info.child == u8) {
-                bytes += slice.len;
-            } else {
-                for (slice) |item| {
-                    bytes += try length(item, allocator, encoding.items);
-                }
-            }
-        },
-        else => @compileError(@typeName(Data) ++ " is not supported by Craft encode / decode"),
-    }
-
-    return bytes;
-}
-
-fn lengthStruct(
-    data: anytype,
-    allocator: std.mem.Allocator,
-    comptime encoding: Encoding(@TypeOf(data)),
-) !usize {
-    const Data = @TypeOf(data);
-    const struct_info = @typeInfo(Data).@"struct";
-
-    var l: usize = 0;
-    inline for (struct_info.fields) |field| {
-        const field_data = @field(data, field.name);
-        const field_encoding = @field(encoding, field.name);
-        l += try length(field_data, allocator, field_encoding);
-    }
-
-    return l;
-}
-
-fn lengthArray(
-    data: anytype,
-    allocator: std.mem.Allocator,
-    comptime encoding: Encoding(@TypeOf(data)),
-) usize {
-    const Array: type = @TypeOf(data);
-    const array_info = @typeInfo(Array).array;
-    var bytes: usize = 0;
-    switch (encoding.length) {
-        .enabled => |lp| {
-            const C = lp.Counter();
-            const count = @as(C, @intCast(array_info.len));
-            bytes += try lengthInt(count, lp.encoding);
-        },
-        .disabled => {},
-    }
-
-    const Payload = array_info.child;
-    if (Payload == u8) {
-        bytes += array_info.len;
-    } else {
-        const items_encoding = encoding.items;
-        inline for (data) |item| {
-            bytes += try length(item, allocator, items_encoding);
-        }
-    }
-
-    return bytes;
-}
-
-fn lengthOptional(
-    data: anytype,
-    allocator: std.mem.Allocator,
-    comptime encoding: Encoding(@TypeOf(data)),
-) !usize {
-    return (if (data) |d| try length(d, allocator, encoding) else 0) + 1;
-}
-
-fn lengthEnum(
-    data: anytype,
-    allocator: std.mem.Allocator,
-    comptime encoding: Encoding(@TypeOf(data)),
-) !usize {
-    return length(getWireTag(data), allocator, encoding);
-}
-
-fn lengthUnion(
-    data: anytype,
-    allocator: std.mem.Allocator,
-    comptime encoding: Encoding(@TypeOf(data)),
-) !usize {
-    switch (data) {
-        inline else => |body, tag| {
-            const tag_bytes = try length(tag, allocator, encoding.tag);
-            const field_encoding = @field(encoding.fields, @tagName(tag));
-            const field_bytes = try length(body, allocator, field_encoding);
-            return tag_bytes + field_bytes;
-        },
-    }
-}
-
-fn lengthJson(
-    data: anytype,
-    allocator: std.mem.Allocator,
-    comptime encoding: JsonEncoding,
-) !usize {
-    return try encodeJson(data, std.io.null_writer, allocator, encoding);
 }
 
 test "encoding numeric tagged union" {
@@ -1216,7 +1303,7 @@ test "encoding numeric tagged union" {
         player_id: UUID,
 
         pub const ENCODING: Encoding(@This()) = .{
-            .player_name = .{ .length = .{ .max = 12 } },
+            .player_name = .{ .max_items = 12 },
         };
     };
 
@@ -1259,10 +1346,27 @@ test "encoding numeric tagged union" {
     const allocator = arena.allocator();
 
     var buf = std.ArrayList(u8).init(allocator);
+    var diag_state = Diag.State.init(&arena);
 
     const sb_pkt_encoding: Encoding(ScoreboardPacket) = .{};
-    _ = try encode(sb_pkt, buf.writer(), allocator, .{});
-    std.debug.print("\nin: {any}\nencoding: {any}\nout:{any}\n", .{ sb_pkt, sb_pkt_encoding, buf.items });
+    _ = encode(
+        sb_pkt,
+        buf.writer(),
+        allocator,
+        diag_state.diag(),
+        .{},
+    ) catch |err| {
+        std.debug.print(
+            "failed to encode... diag items {any}\n",
+            .{diag_state.reports.items},
+        );
+        return err;
+    };
+    std.debug.print(
+        "\nin: {any}\nencoding: {any}\nout:{any}\n",
+        .{ sb_pkt, sb_pkt_encoding, buf.items },
+    );
+    std.debug.print("diag items: {any}\n", .{diag_state.reports.items});
 
     var stream = std.io.fixedBufferStream(buf.items);
     const sb_pkt_decoded = (try decode(
@@ -1272,4 +1376,169 @@ test "encoding numeric tagged union" {
         sb_pkt_encoding,
     )).unwrap(null);
     std.debug.print("\ndecoded: {any}\n", .{sb_pkt_decoded});
+
+    try std.testing.expectEqual(
+        buf.items.len,
+        try length(
+            sb_pkt,
+            arena.allocator(),
+            .{},
+            sb_pkt_encoding,
+        ),
+    );
+}
+
+pub const Diag = struct {
+    state: ?*State = null,
+    path: Path = .{},
+
+    pub const Path = std.BoundedArray(PathComponent, 32);
+
+    pub fn child(diag: Diag, component: PathComponent) error{DiagTooDeep}!Diag {
+        if (diag.state == null) {
+            return diag;
+        }
+
+        var next_path = diag.path;
+        next_path.append(component) catch {
+            return error.DiagTooDeep;
+        };
+
+        return .{
+            .state = diag.state,
+            .path = next_path,
+        };
+    }
+
+    pub fn report(
+        diag: Diag,
+        code: anyerror,
+        typ: []const u8,
+        comptime msg: []const u8,
+        args: anytype,
+    ) void {
+        if (diag.state) |state| {
+            var msg_buf = std.ArrayList(u8).init(state.arena.allocator());
+            msg_buf.writer().print(msg, args) catch {
+                return;
+            };
+
+            state.report(.{
+                .at = diag.path,
+                .code = code,
+                .type = typ,
+                .message = msg_buf.toOwnedSlice() catch "error printing error... bro",
+            });
+        }
+    }
+
+    pub const PathComponent = union(enum) {
+        packet_length,
+        packet_data_length,
+        packet_id,
+        packet_body,
+        field: []const u8,
+        tag,
+        optional_prefix,
+        payload,
+        length_prefix,
+        index: usize,
+    };
+
+    pub const Report = struct {
+        at: Path,
+        code: anyerror,
+        type: []const u8,
+        message: []const u8,
+
+        pub fn format(
+            r: Report,
+            comptime fmt: []const u8,
+            options: std.fmt.FormatOptions,
+            writer: anytype,
+        ) !void {
+            _ = fmt;
+            _ = options;
+
+            const path_parts: []const PathComponent = r.at.constSlice();
+            for (path_parts) |component| {
+                switch (component) {
+                    .packet_length => try writer.writeAll("packet.length"),
+                    .packet_data_length => try writer.writeAll("packet.data_length"),
+                    .packet_id => try writer.writeAll("packet.id"),
+                    .packet_body => try writer.writeAll("packet.body"),
+                    .field => |field_name| try writer.print(".{s}", .{field_name}),
+                    .tag => try writer.writeAll("|Tag"),
+                    .payload => {},
+                    .length_prefix => try writer.writeAll("|LengthPrefix"),
+                    .optional_prefix => try writer.writeAll("|OptionalPrefix"),
+                    .index => |idx| try writer.print("[{d}]", .{idx}),
+                }
+            }
+            if (path_parts.len > 0) {
+                try writer.writeAll(" ");
+            }
+            if (r.type.len > 0) {
+                try writer.print("{s} ", .{r.type});
+            }
+            try writer.print(
+                "--> code = {any}, msg = {s}",
+                .{
+                    r.code,
+                    r.message,
+                },
+            );
+        }
+    };
+
+    pub const State = struct {
+        reports: std.ArrayList(Report),
+        arena: *std.heap.ArenaAllocator,
+
+        pub fn init(arena: *std.heap.ArenaAllocator) State {
+            return .{
+                .reports = std.ArrayList(Report).init(arena.allocator()),
+                .arena = arena,
+            };
+        }
+
+        pub fn diag(state: *State) Diag {
+            return .{ .state = state };
+        }
+
+        fn report(state: *State, r: Report) void {
+            state.reports.append(r) catch {};
+        }
+    };
+};
+
+test "encode heap arrays u8" {
+    const TestPacket = struct {
+        fixed_data1: *const [128]u8,
+        fixed_data2: *const [256]u8,
+    };
+
+    const d1: [128]u8 = .{18} ** 128;
+    const d2: [256]u8 = .{7} ** 256;
+
+    const test_pkt: TestPacket = .{
+        .fixed_data1 = &d1,
+        .fixed_data2 = &d2,
+    };
+
+    var encode_buf = std.ArrayList(u8).init(std.testing.allocator);
+    defer encode_buf.deinit();
+
+    _ = try encode(test_pkt, encode_buf.writer(), std.testing.allocator, .{}, .{});
+
+    var decode_stream = std.io.fixedBufferStream(encode_buf.items);
+    var decode_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer decode_arena.deinit();
+    const test_pkt_decoded: TestPacket = (try decode(
+        TestPacket,
+        decode_stream.reader(),
+        &decode_arena,
+        .{},
+    )).unwrap(null);
+    try std.testing.expectEqualDeep(test_pkt, test_pkt_decoded);
 }

@@ -79,4 +79,17 @@ pub fn build(b: *std.Build) void {
     // running the unit tests.
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_unit_tests.step);
+
+    const run_cover = b.addSystemCommand(&.{
+        "kcov-zig",
+        "--clean",
+        "--include-pattern=src/",
+        "--exclude-path=src/main.zig",
+        "--exclude-pattern=.cache/zig",
+        b.pathJoin(&.{ b.install_path, "cover" }),
+    });
+    run_cover.addArtifactArg(exe_unit_tests);
+
+    const cover_step = b.step("coverage", "Run kcov-zig for unit test coverage");
+    cover_step.dependOn(&run_cover.step);
 }
