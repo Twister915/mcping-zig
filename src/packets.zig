@@ -426,3 +426,29 @@ pub const ConfigUpdateTagsPacket = struct {
         };
     };
 };
+
+pub const ConfigAddResourcePackPacket = struct {
+    id: UUID,
+    url: []const u8,
+    hash: []const u8,
+    forced: bool,
+    prompt_message: ?chat.Component,
+};
+
+pub const ConfigResourcePackResponsePacket = struct {
+    id: UUID,
+    result: enum(i32) {
+        successfully_downloaded = 0,
+        declined = 1,
+        failed_to_download = 2,
+        accepted = 3,
+        downloaded = 4,
+        invalid_url = 5,
+        failed_to_reload = 6,
+        discarded = 7,
+    },
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .result = .varnum,
+    };
+};

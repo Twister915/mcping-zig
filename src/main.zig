@@ -327,6 +327,7 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
             },
             0x03 => {
                 // finish configuration
+                _ = try conn.writePacket(0x03, {}, diag);
                 break :configuration_state;
             },
             0x04 => {
@@ -353,7 +354,24 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
                 }
             },
             0x08 => {}, // remove resource pack, do nothing
-            0x09 => {}, // add resource pack, do nothing
+            0x09 => {
+                // add resource pack
+                const add_resource_pack_packet = try configuration_packet.decodeAs(packets.ConfigAddResourcePackPacket, &arena_allocator);
+                defer _ = arena_allocator.reset(.retain_capacity);
+
+                log.debug("add_resource_pack: id={}, url={s}, hash={s}, forced={any}, prompt_msg={?}", .{
+                    add_resource_pack_packet.id,
+                    add_resource_pack_packet.url,
+                    add_resource_pack_packet.hash,
+                    add_resource_pack_packet.forced,
+                    add_resource_pack_packet.prompt_message,
+                });
+
+                _ = try conn.writePacket(0x06, packets.ConfigResourcePackResponsePacket{
+                    .id = add_resource_pack_packet.id,
+                    .result = .declined,
+                }, diag);
+            },
             0x0A => {}, // store cookie, do nothing
             0x0B => {}, // transfer, not implemented
             0x0C => {
