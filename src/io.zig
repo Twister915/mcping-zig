@@ -1475,11 +1475,14 @@ pub const Diag = struct {
                     .index => |idx| try writer.print("[{d}]", .{idx}),
                 }
             }
+            if (path_parts.len > 0) {
+                try writer.writeAll(" ");
+            }
             if (r.type.len > 0) {
-                try writer.print("{s}", .{r.type});
+                try writer.print("{s} ", .{r.type});
             }
             try writer.print(
-                "  --> code = {any}, msg = {s}",
+                "--> code = {any}, msg = {s}",
                 .{
                     r.code,
                     r.message,

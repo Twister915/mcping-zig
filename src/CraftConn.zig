@@ -61,14 +61,25 @@ pub const ReadPkt = struct {
     pub fn decodeAs(self: Self, comptime T: type, arena_allocator: *std.heap.ArenaAllocator) !T {
         const encoding = comptime defaultPacketEncoding(T);
         var stream = std.io.fixedBufferStream(self.payload);
+        var counting_stream = std.io.countingReader(stream.reader());
         const decoded: craft_io.Decoded(T) = try craft_io.decode(
             T,
-            stream.reader(),
+            counting_stream.reader(),
             arena_allocator,
             encoding,
         );
         const expected_len = self.payload.len;
+        const actual_bytes_decoded: usize = @intCast(counting_stream.bytes_read);
         if (decoded.bytes_read != expected_len) {
+            log.warn(
+                "packet 0x{X:0>2} not parsed completely, real_size={d}, read_bytes={d}, reported_bytes_read={d}",
+                .{
+                    @as(u32, @intCast(self.id)),
+                    expected_len,
+                    actual_bytes_decoded,
+                    decoded.bytes_read,
+                },
+            );
             return error.PacketNotCompletelyParsed;
         }
         return decoded.value;

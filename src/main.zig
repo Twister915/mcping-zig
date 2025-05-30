@@ -6,6 +6,8 @@ const craft_chat = @import("chat.zig");
 const draw = @import("draw.zig");
 const craft_io = @import("io.zig");
 
+const log = std.log.scoped(.main);
+
 // setup testing to run all tests in all referenced files
 test {
     std.testing.refAllDeclsRecursive(@This());
@@ -40,14 +42,14 @@ pub fn main() !void {
         if (std.debug.runtime_safety) {
             handleTarget(allocator, "rpi4.jhome");
         } else {
-            std.debug.print("error: must specify at least one target host\n", .{});
+            log.err("must specify at least one target host", .{});
         }
     }
 }
 
 fn handleTarget(allocator: std.mem.Allocator, arg: []const u8) void {
     const target = targetFromArg(arg) catch |err| {
-        std.debug.print("error parsing argument {s} -> {any}\n", .{ arg, err });
+        log.err("error parsing argument {s} -> {any}", .{ arg, err });
         return;
     };
 
@@ -57,16 +59,16 @@ fn handleTarget(allocator: std.mem.Allocator, arg: []const u8) void {
     var diag_state = craft_io.Diag.State.init(&diag_arena_alloc);
 
     pingPrint(allocator, target, diag_state.diag()) catch |err| {
-        std.debug.print("diag items: {any}\n", .{diag_state.reports.items});
-        std.debug.print("error while pinging {s} -> {any}\n", .{ arg, err });
+        dumpDiagReports(&diag_state);
+        log.err("failed to ping {s} -> {any}", .{ arg, err });
     };
 
     loginOffline(allocator, target, .{
         .username = "Notch",
         .uuid = .random(std.crypto.random),
     }, diag_state.diag()) catch |err| {
-        std.debug.print("diag items: {any}\n", .{diag_state.reports.items});
-        std.debug.print("error while logging into server {s} -> {any}\n", .{ arg, err });
+        dumpDiagReports(&diag_state);
+        log.err("failed log into server {s} -> {any}", .{ arg, err });
     };
 }
 
@@ -101,8 +103,9 @@ fn pingPrint(parent_allocator: std.mem.Allocator, target: Target, diag: craft_io
         .{},
         bash_str_buf.writer(),
     );
+    try bash_str_buf.appendSlice("\n");
 
-    std.debug.print("{s}\n", .{bash_str_buf.items});
+    try std.io.getStdOut().writeAll(bash_str_buf.items);
 
     if (response.status.favicon) |favicon_raw| {
         const favicon_decoded = try favicon_raw.decode(allocator);
@@ -114,7 +117,8 @@ fn pingPrint(parent_allocator: std.mem.Allocator, target: Target, diag: craft_io
 
         var favicon_printed_buf = std.ArrayList(u8).init(allocator);
         try favicon_printer.draw(favicon_printed_buf.writer());
-        std.debug.print("{s}\n", .{favicon_printed_buf.items});
+        try favicon_printed_buf.appendSlice("\n");
+        try std.io.getStdOut().writeAll(favicon_printed_buf.items);
     }
 }
 
@@ -173,6 +177,8 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
     var conn = try CraftConn.connect(allocator, target.host, target.port);
     defer conn.deinit();
 
+    log.debug("switched to handshaking state", .{});
+
     // use "allocator" for the connection itself, but use arena_allocator for deserializing packets
     // so that we can reset the arena_allocator after we finish processing each packet
     var arena_allocator = std.heap.ArenaAllocator.init(allocator);
@@ -187,6 +193,7 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
     }, diag);
 
     // state = login
+    log.debug("switched to login state", .{});
 
     // 0x00 LoginStart client ----> server
     _ = try conn.writePacket(0x00, packets.LoginStartPacket{
@@ -209,7 +216,7 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
                 const encryption_request_packet = try login_packet.decodeAs(packets.EncryptionRequestPacket, &arena_allocator);
                 defer _ = arena_allocator.reset(.retain_capacity);
 
-                std.debug.print("encryption requested ({}), not supported!\n", .{encryption_request_packet});
+                log.warn("encryption requested ({}) but not supported", .{encryption_request_packet});
                 return error.EncryptionRequested;
             },
             0x02 => {
@@ -261,12 +268,19 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
                     .payload = null,
                 }, diag);
             },
-            else => |other_id| {
-                std.debug.print("bad packet id in login state 0x{x}\n", .{other_id});
+            else => {
+                diag.report(
+                    error.BadPacketId,
+                    "packet",
+                    "bad packet id in login state: 0x{X:02}",
+                    .{@as(u32, @intCast(login_packet.id))},
+                );
                 return error.BadPacketId;
             },
         }
     }
+
+    log.debug("switched to configuration state", .{});
 
     // enter configuration state
     _ = try conn.writePacket(0x00, packets.ConfigClientInformationPacket{
@@ -302,11 +316,14 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
                     .payload = null,
                 }, diag);
             },
-            0x01 => {
-                // plugin message, skip
-            },
+            0x01 => {}, // plugin message, skip
             0x02 => {
                 // disconnect
+                const disconnect_packet = try configuration_packet.decodeAs(packets.DisconnectPacket, &arena_allocator);
+                defer _ = arena_allocator.reset(.retain_capacity);
+
+                log.err("disconnected from {s} --> {s}", .{ target.host, disconnect_packet.reason });
+                return error.Disconnected;
             },
             0x03 => {
                 // finish configuration
@@ -326,17 +343,82 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
 
                 _ = try conn.writePacket(0x05, ping_packet, diag);
             },
-            0x06 => {
-                // reset chat, do nothing
-            },
+            0x06 => {}, // reset chat, do nothing
             0x07 => {
-                // registry data
+                const registry_data_packet = try configuration_packet.decodeAs(packets.ConfigRegistryDataPacket, &arena_allocator);
+                defer _ = arena_allocator.reset(.retain_capacity);
+
+                for (registry_data_packet.entries) |registry_entry| {
+                    log.debug("registry({s}): {s} -> {any}", .{ registry_data_packet.registry_id, registry_entry.id, registry_entry.data });
+                }
             },
-            else => return error.BadPacketId,
+            0x08 => {}, // remove resource pack, do nothing
+            0x09 => {}, // add resource pack, do nothing
+            0x0A => {}, // store cookie, do nothing
+            0x0B => {}, // transfer, not implemented
+            0x0C => {
+                // feature flags
+                const feature_flags_packet = try configuration_packet.decodeAs(packets.ConfigFeatureFlagsPacket, &arena_allocator);
+                defer _ = arena_allocator.reset(.retain_capacity);
+
+                for (feature_flags_packet.feature_flags) |feature_flag| {
+                    log.debug("feature flag = {s}", .{feature_flag});
+                }
+            },
+            0x0D => {
+                // update tags
+                const update_tags_packet = try configuration_packet.decodeAs(packets.ConfigUpdateTagsPacket, &arena_allocator);
+                defer _ = arena_allocator.reset(.retain_capacity);
+
+                for (update_tags_packet.registry_tags) |tags| {
+                    for (tags.tags) |tag| {
+                        log.debug("tags({s}) {s} -> {any}", .{ tags.registry_id, tag.name, tag.entries });
+                    }
+                }
+            },
+            0x0E => {
+                // clientbound known packs
+                const known_packs_packet = try configuration_packet.decodeAs(packets.ConfigKnownPacksPacket, &arena_allocator);
+                defer _ = arena_allocator.reset(.retain_capacity);
+
+                var sb_known_packs = std.ArrayList(packets.ConfigKnownPacksPacket.KnownPack).init(arena_allocator.allocator());
+                for (known_packs_packet.known_packs) |known_pack| {
+                    if (std.mem.eql(u8, known_pack.namespace, "minecraft") and std.mem.eql(u8, known_pack.id, "core")) {
+                        try sb_known_packs.append(known_pack);
+                    }
+
+                    log.debug("server declared known pack {any}", .{known_pack});
+                }
+
+                if (sb_known_packs.items.len == 0) {
+                    log.warn("about to tell the server we know about 0 packs, probably won't work", .{});
+                }
+
+                _ = try conn.writePacket(0x07, packets.ConfigKnownPacksPacket{ .known_packs = sb_known_packs.items }, diag);
+            },
+            0x0F => {}, // custom report details, not implemented
+            0x10 => {}, // server links, not implemented
+            else => {
+                diag.report(
+                    error.BadPacketId,
+                    "packet",
+                    "bad packet id in configuration state: 0x{X:02}",
+                    .{@as(u32, @intCast(configuration_packet.id))},
+                );
+                return error.BadPacketId;
+            },
         }
     }
 
+    log.debug("switched to play state", .{});
+
     // now we're in configuration state
     // but we don't have any of those packets, so return error
-    return error.ConfigurationState;
+    return error.PlayState;
+}
+
+fn dumpDiagReports(diag_state: *const craft_io.Diag.State) void {
+    for (diag_state.reports.items) |diag_report| {
+        log.warn("diag report: {}", .{diag_report});
+    }
 }

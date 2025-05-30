@@ -3,6 +3,9 @@ const craft_io = @import("io.zig");
 const chat = @import("chat.zig");
 const UUID = @import("UUID.zig");
 const util = @import("util.zig");
+const nbt = @import("nbt.zig");
+
+const MAX_IDENTIFIER_SIZE: usize = 0x7FFF;
 
 // state = handshake
 pub const HandshakingPacket = struct {
@@ -45,7 +48,7 @@ pub const StatusResponsePacket = struct {
     const Encoding = craft_io.Encoding(@This());
     pub const ENCODING: Encoding = .{
         .status = .{
-            .string_encoding = .{ .max_items = 0x7FFF },
+            .string_encoding = .{ .max_items = MAX_IDENTIFIER_SIZE },
             .parse_options = .{ .ignore_unknown_fields = true },
         },
     };
@@ -156,7 +159,7 @@ pub const LoginSuccessPacket = struct {
         const PropertyEncoding = craft_io.Encoding(@This());
         pub const ENCODING: PropertyEncoding = .{
             .name = .{ .max_items = 0x40 },
-            .value = .{ .max_items = 0x7FFF },
+            .value = .{ .max_items = MAX_IDENTIFIER_SIZE },
             .signature = .{ .max_items = 0x400 },
         };
     };
@@ -211,7 +214,7 @@ pub const LoginPluginRequestPacket = struct {
 
     pub const Encoding = craft_io.Encoding(@This());
     pub const ENCODING: Encoding = .{
-        .channel = .{ .max_items = 0x7FFF },
+        .channel = .{ .max_items = MAX_IDENTIFIER_SIZE },
         .data = .{ .max_items = 0x100000, .length = .disabled },
     };
 };
@@ -252,7 +255,7 @@ pub const CookieResponsePacket = struct {
 
     pub const Encoding = craft_io.Encoding(@This());
     pub const ENCODING: Encoding = .{
-        .key = .{ .max_items = 0x7FFF },
+        .key = .{ .max_items = MAX_IDENTIFIER_SIZE },
         .payload = .{ .max_items = 0x1400 },
     };
 };
@@ -331,10 +334,95 @@ pub const ConfigPluginMessagePacket = struct {
 
     pub const Encoding = craft_io.Encoding(@This());
     pub const ENCODING: Encoding = .{
-        .channel = .{ .max_items = 0x7FFF },
+        .channel = .{ .max_items = MAX_IDENTIFIER_SIZE },
         .data = .{ .max_items = 0x100000, .length = .disabled },
     };
 };
 
 pub const KeepAlivePacket = struct { id: i64 };
 pub const ConfigPingPacket = struct { id: i32 };
+
+pub const ConfigFeatureFlagsPacket = struct {
+    feature_flags: []const []const u8,
+
+    pub const Encoding: type = craft_io.Encoding(@This());
+    pub const ENCODING: Encoding = .{
+        .feature_flags = .{ .items = .{ .max_items = MAX_IDENTIFIER_SIZE } },
+    };
+};
+
+pub const ConfigKnownPacksPacket = struct {
+    known_packs: []const KnownPack,
+
+    pub const KnownPack = struct {
+        namespace: []const u8,
+        id: []const u8,
+        version: []const u8,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .namespace = .{ .max_items = MAX_IDENTIFIER_SIZE },
+            .id = .{ .max_items = MAX_IDENTIFIER_SIZE },
+            .version = .{ .max_items = MAX_IDENTIFIER_SIZE },
+        };
+
+        pub fn format(
+            known_pack: KnownPack,
+            comptime fmt: []const u8,
+            options: std.fmt.FormatOptions,
+            writer: anytype,
+        ) !void {
+            _ = fmt;
+            _ = options;
+            try std.fmt.format(
+                writer,
+                "{{.namespace = {s}, .id = {s}, .version = {s}}}",
+                .{
+                    known_pack.namespace,
+                    known_pack.id,
+                    known_pack.version,
+                },
+            );
+        }
+    };
+};
+
+pub const ConfigRegistryDataPacket = struct {
+    registry_id: []const u8,
+    entries: []const Entry,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .registry_id = .{ .max_items = MAX_IDENTIFIER_SIZE },
+    };
+
+    pub const Entry = struct {
+        id: []const u8,
+        data: ?nbt.NamedTag,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .id = .{ .max_items = MAX_IDENTIFIER_SIZE },
+        };
+    };
+};
+
+pub const ConfigUpdateTagsPacket = struct {
+    registry_tags: []const Tags,
+
+    pub const Tags = struct {
+        registry_id: []const u8,
+        tags: []const Tag,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .registry_id = .{ .max_items = MAX_IDENTIFIER_SIZE },
+        };
+    };
+
+    pub const Tag = struct {
+        name: []const u8,
+        entries: []const i32,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .name = .{ .max_items = MAX_IDENTIFIER_SIZE },
+            .entries = .{ .items = .varnum },
+        };
+    };
+};
