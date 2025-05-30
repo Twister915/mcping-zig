@@ -6,6 +6,11 @@ const craft_chat = @import("chat.zig");
 const draw = @import("draw.zig");
 const craft_io = @import("io.zig");
 
+// setup testing to run all tests in all referenced files
+test {
+    std.testing.refAllDeclsRecursive(@This());
+}
+
 pub const std_options: std.Options = .{
     .log_level = if (std.debug.runtime_safety) .debug else .info,
 };

@@ -19,7 +19,7 @@ pub const HandshakingPacket = struct {
     pub const ENCODING: Encoding = .{
         .version = .varnum,
         .next_state = .varnum,
-        .address = .{ .length = .{ .max = 0xFF } },
+        .address = .{ .max_items = 0xFF },
     };
 };
 
@@ -34,7 +34,7 @@ test "encode handshaking packet" {
     var buf = std.ArrayList(u8).init(std.testing.allocator);
     defer buf.deinit();
 
-    _ = try craft_io.encode(pkt, std.testing.allocator, buf.writer(), HandshakingPacket);
+    _ = try craft_io.encode(pkt, buf.writer(), std.testing.allocator, .{}, HandshakingPacket.ENCODING);
     std.debug.print("\nin: {any}\nencoding: {any}\nout:{any}\n", .{ pkt, HandshakingPacket.ENCODING, buf.items });
 }
 
@@ -45,7 +45,7 @@ pub const StatusResponsePacket = struct {
     const Encoding = craft_io.Encoding(@This());
     pub const ENCODING: Encoding = .{
         .status = .{
-            .string_encoding = .{ .length = .{ .max = 0x7FFF } },
+            .string_encoding = .{ .max_items = 0x7FFF },
             .parse_options = .{ .ignore_unknown_fields = true },
         },
     };
@@ -137,7 +137,7 @@ pub const EncryptionRequestPacket = struct {
     should_authenticate: bool,
 
     const Encoding = craft_io.Encoding(@This());
-    pub const ENCODING: Encoding = .{ .server_id = .{ .length = .{ .max = 20 } } };
+    pub const ENCODING: Encoding = .{ .server_id = .{ .max_items = 20 } };
 };
 
 pub const LoginSuccessPacket = struct {
@@ -146,7 +146,7 @@ pub const LoginSuccessPacket = struct {
     properties: []const Property,
 
     const Encoding = craft_io.Encoding(@This());
-    pub const ENCODING: Encoding = .{ .username = .{ .length = .{ .max = 0x10 } } };
+    pub const ENCODING: Encoding = .{ .username = .{ .max_items = 0x10 } };
 
     pub const Property = struct {
         name: []const u8,
@@ -155,9 +155,9 @@ pub const LoginSuccessPacket = struct {
 
         const PropertyEncoding = craft_io.Encoding(@This());
         pub const ENCODING: PropertyEncoding = .{
-            .name = .{ .length = .{ .max = 0x40 } },
-            .value = .{ .length = .{ .max = 0x7FFF } },
-            .signature = .{ .length = .{ .max = 0x400 } },
+            .name = .{ .max_items = 0x40 },
+            .value = .{ .max_items = 0x7FFF },
+            .signature = .{ .max_items = 0x400 },
         };
     };
 };
@@ -184,14 +184,14 @@ test "encode login success packet" {
     defer buf.deinit();
 
     const login_success_encoding: craft_io.Encoding(LoginSuccessPacket) = .{};
-    _ = try craft_io.encode(pkt, buf.writer(), std.testing.allocator, login_success_encoding);
+    _ = try craft_io.encode(pkt, buf.writer(), std.testing.allocator, .{}, login_success_encoding);
     std.debug.print(
         "\nin: {any}\nencoding: {any}\nout:{any}\nlength(pkt): pred={d}, act={d}\n",
         .{
             pkt,
             login_success_encoding,
             buf.items,
-            try craft_io.length(pkt, std.testing.allocator, login_success_encoding),
+            try craft_io.length(pkt, std.testing.allocator, .{}, login_success_encoding),
             buf.items.len,
         },
     );
@@ -211,8 +211,8 @@ pub const LoginPluginRequestPacket = struct {
 
     pub const Encoding = craft_io.Encoding(@This());
     pub const ENCODING: Encoding = .{
-        .channel = .{ .length = .{ .max = 0x7FFF } },
-        .data = .{ .length = .{ .prefix = .disabled, .max = 0x100000 } },
+        .channel = .{ .max_items = 0x7FFF },
+        .data = .{ .max_items = 0x100000, .length = .disabled },
     };
 };
 
@@ -226,7 +226,7 @@ pub const LoginStartPacket = struct {
 
     pub const Encoding = craft_io.Encoding(@This());
     pub const ENCODING: Encoding = .{
-        .name = .{ .length = .{ .max = 0x10 } },
+        .name = .{ .max_items = 0x10 },
     };
 };
 
@@ -242,7 +242,7 @@ pub const LoginPluginResponsePacket = struct {
     pub const Encoding = craft_io.Encoding(@This());
     pub const ENCODING: Encoding = .{
         .message_id = .varnum,
-        .data = .{ .length = .{ .prefix = .disabled, .max = 0x100000 } },
+        .data = .{ .max_items = 0x100000, .length = .disabled },
     };
 };
 
@@ -252,8 +252,8 @@ pub const CookieResponsePacket = struct {
 
     pub const Encoding = craft_io.Encoding(@This());
     pub const ENCODING: Encoding = .{
-        .key = .{ .length = .{ .max = 0x7FFF } },
-        .payload = .{ .length = .{ .max = 0x1400 } },
+        .key = .{ .max_items = 0x7FFF },
+        .payload = .{ .max_items = 0x1400 },
     };
 };
 
@@ -289,7 +289,7 @@ pub const ConfigClientInformationPacket = struct {
 
     pub const Encoding = craft_io.Encoding(@This());
     pub const ENCODING: Encoding = .{
-        .locale = .{ .length = .{ .max = 16 } },
+        .locale = .{ .max_items = 16 },
         .chat_mode = .varnum,
         .main_hand = .varnum,
         .particle_status = .varnum,
@@ -321,7 +321,7 @@ test "encoding of config client information packet" {
     const allocator = arena.allocator();
 
     var buf = std.ArrayList(u8).init(allocator);
-    _ = try craft_io.encode(packet, buf.writer(), allocator, ConfigClientInformationPacket.ENCODING);
+    _ = try craft_io.encode(packet, buf.writer(), allocator, .{}, ConfigClientInformationPacket.ENCODING);
     std.debug.print("encoded {d} bytes -> {any}\n", .{ buf.items.len, buf.items });
 }
 
@@ -331,8 +331,8 @@ pub const ConfigPluginMessagePacket = struct {
 
     pub const Encoding = craft_io.Encoding(@This());
     pub const ENCODING: Encoding = .{
-        .channel = .{ .length = .{ .max = 0x7FFF } },
-        .data = .{ .length = .{ .prefix = .disabled, .max = 0x100000 } },
+        .channel = .{ .max_items = 0x7FFF },
+        .data = .{ .max_items = 0x100000, .length = .disabled },
     };
 };
 

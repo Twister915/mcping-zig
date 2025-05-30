@@ -191,7 +191,7 @@ test "encode uuid" {
     defer buf.deinit();
 
     const id0 = UUID.random(std.crypto.random);
-    const bytes = try @import("io.zig").encode(id0, buf.writer(), {});
-    try std.testing.expectEqual(UUID.NUM_BYTES, bytes);
+    const bytes = try @import("io.zig").encode(id0, buf.writer(), std.testing.allocator, .{}, .{});
+    try std.testing.expectEqual(UUID.BYTES, bytes);
     try std.testing.expectEqualStrings(&id0.raw, buf.items);
 }

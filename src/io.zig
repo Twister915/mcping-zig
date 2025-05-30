@@ -238,11 +238,6 @@ fn StructByFieldsEncoding(comptime Struct: type) type {
     return @Type(EncodingStruct);
 }
 
-pub const LengthEncoding = struct {
-    max: comptime_int = MAX_PACKET_SIZE,
-    prefix: LengthPrefixMode = .{ .enabled = .{} },
-};
-
 pub const LengthPrefixMode = union(enum) {
     disabled,
     enabled: LengthPrefixEncoding,
@@ -260,8 +255,6 @@ pub const LengthPrefixEncoding = struct {
     }
 };
 
-pub const DEFAULT_LENGTH_ENCODING: LengthEncoding = .{};
-
 fn PointerEncoding(comptime P: type) type {
     const pointer_info = @typeInfo(P).pointer;
     switch (pointer_info.size) {
@@ -274,7 +267,8 @@ fn PointerEncoding(comptime P: type) type {
 
             const ItemsEncoding = Encoding(pointer_info.child);
             return struct {
-                length: LengthEncoding = DEFAULT_LENGTH_ENCODING,
+                max_items: comptime_int = MAX_PACKET_SIZE,
+                length: LengthPrefixMode = .{ .enabled = .{} },
                 items: ItemsEncoding = defaultEncoding(pointer_info.child),
             };
         },
@@ -370,7 +364,7 @@ test "encode i16 .default" {
         var array_list = std.ArrayList(u8).init(std.testing.allocator);
         defer array_list.deinit();
 
-        const bytes = try encode(test_case.input, array_list.writer(), .default);
+        const bytes = try encode(test_case.input, array_list.writer(), std.testing.allocator, .{}, .default);
         try std.testing.expectEqual(2, bytes);
         try std.testing.expectEqualSlices(u8, &test_case.expected, array_list.items);
     }
@@ -393,7 +387,7 @@ test "encode i32 .default" {
         var array_list = std.ArrayList(u8).init(std.testing.allocator);
         defer array_list.deinit();
 
-        const bytes = try encode(test_case.input, array_list.writer(), .default);
+        const bytes = try encode(test_case.input, array_list.writer(), std.testing.allocator, .{}, .default);
         try std.testing.expectEqual(4, bytes);
         try std.testing.expectEqualSlices(u8, &test_case.expected, array_list.items);
     }
@@ -554,6 +548,7 @@ fn encodeStructByFields(
     return bytes;
 }
 
+// type safe variant of encodePointerInner
 fn encodePointer(
     data: anytype,
     writer: anytype,
@@ -561,12 +556,36 @@ fn encodePointer(
     diag: Diag,
     comptime encoding: Encoding(@TypeOf(data)),
 ) !usize {
+    return encodePointerInner(data, writer, allocator, diag, encoding);
+}
+
+// slightly less type safe variant of encodePointer, which allows encoding to not conform to Encoding(@TypeOf(data))
+fn encodePointerInner(
+    data: anytype,
+    writer: anytype,
+    allocator: std.mem.Allocator,
+    diag: Diag,
+    comptime encoding: anytype,
+) !usize {
     const P = @TypeOf(data);
     const ptr_info = @typeInfo(P).pointer;
 
     switch (ptr_info.size) {
         .one => {
-            return encode(data.*, writer, allocator, diag, encoding);
+            const Payload: type = ptr_info.child;
+            const payload_info = @typeInfo(Payload);
+            switch (payload_info) {
+                .array => |array_info| {
+                    // *[N]T, can become []const T
+                    const ArrayPayload = array_info.child;
+                    const ConstSlice: type = []const ArrayPayload;
+                    return encodePointerInner(@as(ConstSlice, data), writer, allocator, diag, encoding);
+                },
+                else => {
+                    // *T
+                    return encode(data.*, writer, allocator, diag, encoding);
+                },
+            }
         },
         .many, .slice => {
             // first, let's error out in the [*]T case, because there's no way to know when to stop encoding
@@ -590,8 +609,7 @@ fn encodePointer(
 
             var bytes: usize = 0;
             // dealing with length
-            const len_encoding: LengthEncoding = encoding.length;
-            switch (len_encoding.prefix) {
+            switch (encoding.length) {
                 .enabled => |lp| {
                     const Counter = lp.Counter();
                     const counter: Counter = @as(Counter, @intCast(slice.len));
@@ -600,14 +618,17 @@ fn encodePointer(
                 else => {},
             }
 
-            if (slice.len > len_encoding.max) {
-                diag.report(
-                    error.PacketTooBig,
-                    @typeName(P),
-                    "items {d} exceed configured maximum {d}",
-                    .{ slice.len, len_encoding.max },
-                );
-                return error.PacketTooBig;
+            // sometimes, an array such as *[1024]T will be converted to a slice []T. In those cases
+            if (@hasField(@TypeOf(encoding), "max_items")) {
+                if (slice.len > encoding.max_items) {
+                    diag.report(
+                        error.PacketTooBig,
+                        @typeName(P),
+                        "items {d} exceed configured maximum {d}",
+                        .{ slice.len, encoding.max_items },
+                    );
+                    return error.PacketTooBig;
+                }
             }
 
             // []u8, []const u8, etc
@@ -617,7 +638,13 @@ fn encodePointer(
             } else {
                 // and now with either []T or []const T, we can iterate over the items and encode
                 for (slice, 0..) |item, idx| {
-                    bytes += try encode(item, writer, allocator, try diag.child(.{ .index = idx }), encoding.items);
+                    bytes += try encode(
+                        item,
+                        writer,
+                        allocator,
+                        try diag.child(.{ .index = idx }),
+                        encoding.items,
+                    );
                 }
             }
 
@@ -872,24 +899,77 @@ fn decodePointer(
     const Payload = Ptr.child;
     switch (Ptr.size) {
         .one => {
-            // *T
-            const allocated_ptr: NonConstPointer(Data) = try allocator.create(Payload);
-            errdefer allocator.destroy(allocated_ptr);
+            const payload_info = @typeInfo(Payload);
+            switch (payload_info) {
+                .array => |array_info| {
+                    // this handles case *[N]Elem or *const [N]Elem
+                    const Elem = array_info.child;
+                    const N = array_info.len;
+                    var bytes_read: usize = 0;
+                    switch (encoding.length) {
+                        .enabled => |lp| {
+                            const Cnt = lp.Counter();
+                            const count_dcd: usize = @intCast(
+                                (try decode(
+                                    Cnt,
+                                    reader,
+                                    allocator,
+                                    lp.encoding,
+                                )).unwrap(&bytes_read),
+                            );
+                            if (count_dcd != N) {
+                                return error.ExactSizedArrayBadLengthPrefix;
+                            }
+                        },
+                        .disabled => {},
+                    }
 
-            const decoded_payload = try decode(Payload, reader, allocator, encoding);
-            allocated_ptr.* = decoded_payload.value;
-            return .{ .bytes_read = decoded_payload.bytes_read, .value = allocated_ptr };
+                    // allocate [N]Elem on the heap
+                    const buf: []Elem = try allocator.alloc(Elem, N);
+                    errdefer allocator.free(buf);
+
+                    // if Elem is u8, then decode bytes directly
+                    if (Elem == u8) {
+                        try reader.readNoEof(buf);
+                        bytes_read += N;
+                    } else {
+                        // otherwise, decode each item individually
+                        const items_encoding = encoding.items;
+                        for (buf) |*target| {
+                            target.* = (try decode(
+                                Elem,
+                                reader,
+                                allocator,
+                                items_encoding,
+                            )).unwrap(&bytes_read);
+                        }
+                    }
+
+                    return .{
+                        .value = @ptrCast(buf),
+                        .bytes_read = bytes_read,
+                    };
+                },
+                else => {
+                    // other *T, not arrays
+                    const allocated_ptr: NonConstPointer(Data) = try allocator.create(Payload);
+                    errdefer allocator.destroy(allocated_ptr);
+
+                    const decoded_payload = try decode(Payload, reader, allocator, encoding);
+                    allocated_ptr.* = decoded_payload.value;
+                    return .{ .bytes_read = decoded_payload.bytes_read, .value = allocated_ptr };
+                },
+            }
         },
         .many, .slice => {
             var bytes: usize = 0;
             var dst: NonConstPointer(Data) = undefined;
 
-            const length_encoding: LengthEncoding = encoding.length;
-            switch (length_encoding.prefix) {
+            switch (encoding.length) {
                 .disabled => {
                     // read until reader runs dry
                     if (Payload == u8) {
-                        dst = reader.readAllAlloc(allocator, length_encoding.max) catch |err| switch (err) {
+                        dst = reader.readAllAlloc(allocator, encoding.max_items) catch |err| switch (err) {
                             error.StreamTooLong => return error.PacketTooBig,
                             else => return err,
                         };
@@ -903,7 +983,7 @@ fn decodePointer(
                     // decode the counter from the wire
                     const Counter = lp.Counter();
                     const count: usize = @intCast((try decodeInt(Counter, reader, lp.encoding)).unwrap(&bytes));
-                    if (count > length_encoding.max) {
+                    if (count > encoding.max_items) {
                         return error.PacketTooBig;
                     }
 
@@ -1223,7 +1303,7 @@ test "encoding numeric tagged union" {
         player_id: UUID,
 
         pub const ENCODING: Encoding(@This()) = .{
-            .player_name = .{ .length = .{ .max = 12 } },
+            .player_name = .{ .max_items = 12 },
         };
     };
 
@@ -1428,3 +1508,34 @@ pub const Diag = struct {
         }
     };
 };
+
+test "encode heap arrays u8" {
+    const TestPacket = struct {
+        fixed_data1: *const [128]u8,
+        fixed_data2: *const [256]u8,
+    };
+
+    const d1: [128]u8 = .{18} ** 128;
+    const d2: [256]u8 = .{7} ** 256;
+
+    const test_pkt: TestPacket = .{
+        .fixed_data1 = &d1,
+        .fixed_data2 = &d2,
+    };
+
+    var encode_buf = std.ArrayList(u8).init(std.testing.allocator);
+    defer encode_buf.deinit();
+
+    _ = try encode(test_pkt, encode_buf.writer(), std.testing.allocator, .{}, .{});
+
+    var decode_stream = std.io.fixedBufferStream(encode_buf.items);
+    var decode_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer decode_arena.deinit();
+    const test_pkt_decoded: TestPacket = (try decode(
+        TestPacket,
+        decode_stream.reader(),
+        &decode_arena,
+        .{},
+    )).unwrap(null);
+    try std.testing.expectEqualDeep(test_pkt, test_pkt_decoded);
+}

@@ -389,7 +389,6 @@ fn decodeList(reader: anytype, allocator: std.mem.Allocator) !craft_io.Decoded(T
     unreachable;
 }
 
-// TODO make a list union which is more type safe (all elements same type)
 fn encodeList(data: Tag.List, writer: anytype) !usize {
     var bytes_written: usize = 0;
     bytes_written += try encodeTagType(@as(TagType, data), writer);
