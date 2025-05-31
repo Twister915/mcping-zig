@@ -1571,15 +1571,17 @@ pub const Diag = struct {
     ) void {
         if (std.log.logEnabled(.debug, diag_log_scope)) {
             if (diag.state) |state| {
-                var buf = std.ArrayList(u8).init(state.arena.allocator());
-                defer buf.deinit();
+                if (state.report_ok) {
+                    var buf = std.ArrayList(u8).init(state.arena.allocator());
+                    defer buf.deinit();
 
-                formatPath(diag.at(), buf.writer()) catch {
-                    diag_log.debug("{s} {s} = " ++ fmt ++ " ({d} bytes)", .{ typ, op } ++ args ++ .{bytes});
-                    return;
-                };
+                    formatPath(diag.at(), buf.writer()) catch {
+                        diag_log.debug("{s} {s} = " ++ fmt ++ " ({d} bytes)", .{ typ, op } ++ args ++ .{bytes});
+                        return;
+                    };
 
-                diag_log.debug("{s} {s} {s} = " ++ fmt ++ " ({d} bytes)", .{ buf.items, typ, op } ++ args ++ .{bytes});
+                    diag_log.debug("{s} {s} {s} = " ++ fmt ++ " ({d} bytes)", .{ buf.items, typ, op } ++ args ++ .{bytes});
+                }
             }
         }
     }
@@ -1648,12 +1650,14 @@ pub const Diag = struct {
     }
 
     pub const State = struct {
+        report_ok: bool,
         reports: std.ArrayList(Report),
         arena: *std.heap.ArenaAllocator,
         path: [MAX_DIAG_DEPTH]PathComponent = undefined,
 
-        pub fn init(arena: *std.heap.ArenaAllocator) State {
+        pub fn init(report_ok: bool, arena: *std.heap.ArenaAllocator) State {
             return .{
+                .report_ok = report_ok,
                 .reports = std.ArrayList(Report).init(arena.allocator()),
                 .arena = arena,
             };

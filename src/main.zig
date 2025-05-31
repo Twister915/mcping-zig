@@ -13,6 +13,9 @@ test {
     std.testing.refAllDeclsRecursive(@This());
 }
 
+// turn this on (and build with runtime_safety = true) to see EVERYTHING
+pub const DIAG_REPORT_OK: bool = true;
+
 pub const std_options: std.Options = .{
     .log_level = if (std.debug.runtime_safety) .debug else .info,
 };
@@ -56,7 +59,7 @@ fn handleTarget(allocator: std.mem.Allocator, arg: []const u8) void {
     var diag_arena_alloc = std.heap.ArenaAllocator.init(allocator);
     defer diag_arena_alloc.deinit();
 
-    var diag_state = craft_io.Diag.State.init(&diag_arena_alloc);
+    var diag_state = craft_io.Diag.State.init(DIAG_REPORT_OK, &diag_arena_alloc);
 
     pingPrint(allocator, target, diag_state.diag()) catch |err| {
         dumpDiagReports(&diag_state);
