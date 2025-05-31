@@ -1508,30 +1508,35 @@ test "encoding numeric tagged union" {
     );
 }
 
-const diag_log = std.log.scoped(.diag);
+const diag_log_scope = .diag;
+const diag_log = std.log.scoped(diag_log_scope);
 
 pub const Diag = struct {
     state: ?*State = null,
-    path: Path = .{},
+    path_next_idx: usize = 0,
 
-    pub const Error = error{DiagTooDeep};
-
-    pub const Path = std.BoundedArray(PathComponent, 32);
+    pub const MAX_DIAG_DEPTH: usize = 32;
 
     pub fn child(diag: Diag, component: PathComponent) !Diag {
-        if (diag.state == null) {
+        if (diag.state) |s| {
+            const next_idx = diag.path_next_idx + 1;
+            if (next_idx >= MAX_DIAG_DEPTH) {
+                return error.DiagTooDeep;
+            }
+
+            s.path[diag.path_next_idx] = component;
+            return .{ .state = s, .path_next_idx = next_idx };
+        } else {
             return diag;
         }
+    }
 
-        var next_path = diag.path;
-        next_path.append(component) catch {
-            return error.DiagTooDeep;
-        };
-
-        return .{
-            .state = diag.state,
-            .path = next_path,
-        };
+    fn at(diag: Diag) []const PathComponent {
+        if (diag.state) |state| {
+            return state.path[0..diag.path_next_idx];
+        } else {
+            return &.{};
+        }
     }
 
     pub fn report(
@@ -1548,7 +1553,7 @@ pub const Diag = struct {
             };
 
             state.report(.{
-                .at = diag.path,
+                .at = diag.at(),
                 .code = code,
                 .type = typ,
                 .message = msg_buf.toOwnedSlice() catch "error printing error... bro",
@@ -1564,16 +1569,18 @@ pub const Diag = struct {
         comptime fmt: []const u8,
         args: anytype,
     ) void {
-        if (diag.state) |state| {
-            var buf = std.ArrayList(u8).init(state.arena.allocator());
-            defer buf.deinit();
+        if (std.log.logEnabled(.debug, diag_log_scope)) {
+            if (diag.state) |state| {
+                var buf = std.ArrayList(u8).init(state.arena.allocator());
+                defer buf.deinit();
 
-            formatPath(diag.path, buf.writer()) catch {
-                diag_log.debug("{s} {s} = " ++ fmt ++ " ({d} bytes)", .{ typ, op } ++ args ++ .{bytes});
-                return;
-            };
+                formatPath(diag.at(), buf.writer()) catch {
+                    diag_log.debug("{s} {s} = " ++ fmt ++ " ({d} bytes)", .{ typ, op } ++ args ++ .{bytes});
+                    return;
+                };
 
-            diag_log.debug("{s} {s} {s} = " ++ fmt ++ " ({d} bytes)", .{ buf.items, typ, op } ++ args ++ .{bytes});
+                diag_log.debug("{s} {s} {s} = " ++ fmt ++ " ({d} bytes)", .{ buf.items, typ, op } ++ args ++ .{bytes});
+            }
         }
     }
 
@@ -1591,7 +1598,7 @@ pub const Diag = struct {
     };
 
     pub const Report = struct {
-        at: Path,
+        at: []const PathComponent,
         code: anyerror,
         type: []const u8,
         message: []const u8,
@@ -1623,8 +1630,8 @@ pub const Diag = struct {
         }
     };
 
-    fn formatPath(path: Path, writer: anytype) !void {
-        for (path.constSlice()) |component| {
+    fn formatPath(path: []const PathComponent, writer: anytype) !void {
+        for (path) |component| {
             switch (component) {
                 .packet_length => try writer.writeAll("packet.length"),
                 .packet_data_length => try writer.writeAll("packet.data_length"),
@@ -1643,6 +1650,7 @@ pub const Diag = struct {
     pub const State = struct {
         reports: std.ArrayList(Report),
         arena: *std.heap.ArenaAllocator,
+        path: [MAX_DIAG_DEPTH]PathComponent = undefined,
 
         pub fn init(arena: *std.heap.ArenaAllocator) State {
             return .{
