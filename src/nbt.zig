@@ -16,45 +16,51 @@ pub const TagType = enum(u8) {
     int_array = 11,
     long_array = 12,
 
-    fn decodeTag(type_id: TagType, reader: anytype, allocator: std.mem.Allocator) anyerror!craft_io.Decoded(Tag) {
-        return switch (type_id) {
-            .end => .{
+    fn decodeTag(type_id: TagType, reader: anytype, allocator: std.mem.Allocator) DecodeError(@TypeOf(reader))!craft_io.Decoded(Tag) {
+        switch (type_id) {
+            .end => return .{
                 .value = .end,
                 .bytes_read = 0,
             },
-            .byte => .{
+            .byte => return .{
                 .value = .{ .byte = @intCast(try reader.readByte()) },
                 .bytes_read = 1,
             },
-            .short => .{
+            .short => return .{
                 .value = .{ .short = try reader.readInt(i16, .big) },
                 .bytes_read = 2,
             },
-            .int => .{
+            .int => return .{
                 .value = .{ .int = try reader.readInt(i32, .big) },
                 .bytes_read = 4,
             },
-            .long => .{
+            .long => return .{
                 .value = .{ .long = try reader.readInt(i64, .big) },
                 .bytes_read = 8,
             },
-            .float => .{
+            .float => return .{
                 .value = .{ .float = @bitCast(try reader.readInt(u32, .big)) },
                 .bytes_read = 4,
             },
-            .double => .{
+            .double => return .{
                 .value = .{ .double = @bitCast(try reader.readInt(u64, .big)) },
                 .bytes_read = 8,
             },
-            .byte_array => try decodeByteArrayTag(reader, allocator),
-            .string => try decodeStringTag(reader, allocator),
-            .list => try decodeListTag(reader, allocator),
-            .compound => try decodeCompoundTag(reader, allocator),
-            .int_array => try decodeIntArrayTag(reader, allocator),
-            .long_array => try decodeLongArrayTag(reader, allocator),
-        };
+            .byte_array => return decodeByteArrayTag(reader, allocator),
+            .string => return decodeStringTag(reader, allocator),
+            .list => return decodeListTag(reader, allocator),
+            .compound => return decodeCompoundTag(reader, allocator),
+            .int_array => return decodeIntArrayTag(reader, allocator),
+            .long_array => return decodeLongArrayTag(reader, allocator),
+        }
     }
 };
+
+pub const NbtDecodeError = error{ UnknownNbtType, InvalidTag };
+
+pub fn DecodeError(comptime Reader: type) type {
+    return NbtDecodeError || Reader.NoEofError || std.mem.Allocator.Error;
+}
 
 pub const Tag = union(TagType) {
     end,
@@ -246,7 +252,7 @@ fn encodeTag(tag: Tag, writer: anytype) !usize {
     return bytes_written;
 }
 
-fn encodeTagPayload(tag: Tag, writer: anytype) anyerror!usize {
+fn encodeTagPayload(tag: Tag, writer: anytype) !usize {
     switch (tag) {
         .end => return 0,
         .byte => |b| {

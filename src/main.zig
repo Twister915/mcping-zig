@@ -459,6 +459,18 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
 
                 log.debug("player abilities set -> {any}", .{player_abilities_packet});
             },
+            0x62 => {
+                const held_item_packet = try play_packet.decodeAs(packets.PlaySetHeldItemPacket, &arena_allocator, diag);
+                defer _ = arena_allocator.reset(.retain_capacity);
+
+                log.debug("set held item slot to {d}", .{held_item_packet.slot});
+            },
+            0x7E => {
+                const update_recipes_packet = try play_packet.decodeAs(packets.PlayUpdateRecipesPacket, &arena_allocator, diag);
+                defer _ = arena_allocator.reset(.retain_capacity);
+
+                log.debug("got recipes: {any}", .{update_recipes_packet});
+            },
             else => {
                 diag.report(
                     error.BadPacketId,

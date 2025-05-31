@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const MAX_PACKET_SIZE: usize = 0x1FFFFF;
+pub const MAX_IDENTIFIER_SIZE: usize = 0x7FFF;
 
 pub fn encode(
     data: anytype,
@@ -49,9 +50,9 @@ pub fn encode(
     }
 
     return switch (data_info) {
-        .int => encodeInt(data, writer, diag, encoding),
+        .int => encodeInt(data, writer, diag, encoding, @typeName(Data)),
         .bool => encode(@as(u8, if (data) 1 else 0), writer, allocator, diag, {}),
-        .float => encodeFloat(data, writer),
+        .float => encodeFloat(data, writer, diag),
         .pointer => encodePointer(data, writer, allocator, diag, encoding),
         .@"struct" => encodeStruct(data, writer, allocator, diag, encoding),
         .array => encodeArray(data, writer, allocator, diag, encoding),
@@ -68,7 +69,7 @@ pub fn decode(
     allocator: *std.heap.ArenaAllocator,
     diag: Diag,
     comptime encoding: Encoding(Data),
-) !Decoded(Data) {
+) anyerror!Decoded(Data) {
     if (std.meta.hasFn(Data, "craftDecode")) {
         return Data.craftDecode(reader, allocator, diag, encoding);
     }
@@ -99,7 +100,7 @@ pub fn decode(
     }
 
     return switch (data_info) {
-        .int => decodeInt(Data, reader, diag, encoding),
+        .int => decodeInt(Data, reader, diag, encoding, @typeName(Data)),
         .bool => decodeBool(reader, diag),
         .float => decodeFloat(Data, reader, diag),
         .pointer => decodePointer(Data, reader, allocator, diag, encoding),
@@ -136,6 +137,10 @@ pub const JsonEncoding = struct {
 };
 
 pub fn Encoding(comptime Payload: type) type {
+    comptime {
+        @setEvalBranchQuota(10000);
+    }
+
     if (Payload == u8) {
         return void;
     }
@@ -197,7 +202,13 @@ pub fn defaultEncoding(comptime Payload: type) Encoding(Payload) {
                 return .{};
             }
         },
-        .@"union", .pointer, .optional, .array => .{},
+        .optional => |opt| defaultEncoding(opt.child),
+        .@"union", .pointer, .array => {
+            if (@typeInfo(Enc) != .@"struct") {
+                @compileError(@typeName(Payload) ++ " has encoding type " ++ @typeName(Enc) ++ " but expected to be a struct...");
+            }
+            return .{};
+        },
         else => @compileError("no default encoding computable for " ++ @typeName(Payload)),
     };
 }
@@ -290,8 +301,17 @@ fn ArrayEncoding(comptime Array: type) type {
 fn UnionEncoding(comptime U: type) type {
     const Tag = WireTagFor(U);
 
+    comptime var defaultEncodingTag: Encoding(Tag) = undefined;
+    const union_info = @typeInfo(U).@"union";
+    const RealTagType = union_info.tag_type.?;
+    if (@typeInfo(RealTagType) == .@"enum" and @hasDecl(RealTagType, "ENCODING")) {
+        defaultEncodingTag = RealTagType.ENCODING;
+    } else {
+        defaultEncodingTag = defaultEncoding(Tag);
+    }
+
     return struct {
-        tag: Encoding(Tag) = defaultEncoding(Tag),
+        tag: Encoding(Tag) = defaultEncodingTag,
         fields: UnionFieldsEncoding(U) = .{},
     };
 }
@@ -330,8 +350,12 @@ fn encodeInt(
     writer: anytype,
     diag: Diag,
     comptime encoding: Encoding(@TypeOf(data)),
+    comptime typ: []const u8,
 ) !usize {
     const Int = @TypeOf(data);
+    comptime if (Encoding(Int) != IntEncoding) {
+        @compileError(@typeName(Int) ++ " cannot be decoded using encoding " ++ @typeName(Encoding(Int)));
+    };
 
     switch (encoding) {
         // for an int type such as u16, i16, u32, i32, etc... let's just write it as big endian on the wire
@@ -339,9 +363,10 @@ fn encodeInt(
             const NUM_BITS = comptime @bitSizeOf(Int);
             const BYTES = comptime std.math.divCeil(usize, NUM_BITS, 8) catch unreachable;
             writer.writeInt(Int, data, .big) catch |err| {
-                diag.report(err, @typeName(Int), "failed to encode as regular int", .{});
+                diag.report(err, typ, "failed to encode as regular int", .{});
                 return err;
             };
+            diag.ok(typ, "encode", BYTES, "{d}", .{data});
             return BYTES;
         },
         // for a VarInt / VarLong as defined in the protocol
@@ -412,6 +437,7 @@ fn encodeVarnum(data: anytype, writer: anytype, diag: Diag) !usize {
             b.* |= 0x80;
         } else {
             try writer.writeAll(buf[0..bytes]);
+            diag.ok(@typeName(IntType), "encode varnum", bytes, "{d}", .{data});
             return bytes;
         }
     }
@@ -433,7 +459,7 @@ fn UnsignedIntEquiv(comptime IntType: type) type {
     };
 }
 
-fn encodeFloat(data: anytype, writer: anytype) !usize {
+fn encodeFloat(data: anytype, writer: anytype, diag: Diag) !usize {
     // inspect the float passed to us... determine it's type
     const Float = @TypeOf(data);
     const NUM_BITS = @bitSizeOf(Float);
@@ -455,7 +481,7 @@ fn encodeFloat(data: anytype, writer: anytype) !usize {
     } });
 
     // convert the raw bits of the float into the int type, then call encodeInt on that
-    return encodeInt(@as(AsInt, @bitCast(data)), writer, .default);
+    return encodeInt(@as(AsInt, @bitCast(data)), writer, diag, .default, @typeName(Float));
 }
 
 fn encodeOptional(
@@ -527,7 +553,7 @@ fn encodeStructByFields(
     writer: anytype,
     allocator: std.mem.Allocator,
     diag: Diag,
-    comptime encoding: StructByFieldsEncoding(@TypeOf(data)),
+    comptime encoding: anytype,
 ) !usize {
     const Struct = @TypeOf(data);
     const struct_info = @typeInfo(Struct).@"struct";
@@ -535,14 +561,12 @@ fn encodeStructByFields(
     var bytes: usize = 0;
     inline for (struct_info.fields) |struct_field| {
         const field_data = @field(data, struct_field.name);
-        const field_encoding = @field(encoding, struct_field.name);
+        const field_encoding = if (@TypeOf(encoding) == void) @as(void, {}) else @field(encoding, struct_field.name);
         bytes += try encode(
             field_data,
             writer,
             allocator,
-            try diag.child(.{
-                .field = struct_field.name,
-            }),
+            try diag.child(.{ .field = struct_field.name }),
             field_encoding,
         );
     }
@@ -636,6 +660,7 @@ fn encodePointerInner(
             // []u8, []const u8, etc
             if (ptr_info.child == u8) {
                 try writer.writeAll(slice);
+                diag.ok(@typeName(P), "encode", slice.len, "{s}", .{slice});
                 bytes += slice.len;
             } else {
                 // and now with either []T or []const T, we can iterate over the items and encode
@@ -686,6 +711,7 @@ fn encodeArray(
     if (Payload == u8) {
         try writer.writeAll(&data);
         bytes += array_info.len;
+        diag.ok(@typeName(Array), "encode", array_info.len, "{s}", .{data});
     } else {
         const item_encoding = encoding.items;
         inline for (0..array_info.len) |idx| {
@@ -770,14 +796,17 @@ fn encodeUnion(
     diag: Diag,
     comptime encoding: Encoding(@TypeOf(data)),
 ) !usize {
+    const Union: type = @TypeOf(data);
+    const UnionEncodingT = Encoding(Union);
     switch (data) {
         inline else => |d, tag| {
-            const tag_diag = try diag.child(.{
-                .field = @tagName(tag),
-            });
+            const tag_diag = try diag.child(.{ .field = @tagName(tag) });
             var bytes: usize = 0;
             bytes += try encode(tag, writer, allocator, try tag_diag.child(.tag), encoding.tag);
-            bytes += try encode(d, writer, allocator, try tag_diag.child(.payload), @field(encoding.fields, @tagName(tag)));
+            const FieldT: type = @FieldType(Union, @tagName(tag));
+            const field_encoding_provided = @hasField(UnionEncodingT, "fields") and @hasField(@TypeOf(encoding.fields), @tagName(tag));
+            const field_encoding = comptime if (field_encoding_provided) @field(encoding.fields, @tagName(tag)) else defaultEncoding(FieldT);
+            bytes += try encode(d, writer, allocator, try tag_diag.child(.payload), field_encoding);
             return bytes;
         },
     }
@@ -826,6 +855,7 @@ pub fn decodeInt(
     reader: anytype,
     diag: Diag,
     comptime encoding: IntEncoding,
+    comptime typ: []const u8,
 ) !Decoded(Int) {
     switch (encoding) {
         .default => {
@@ -833,6 +863,7 @@ pub fn decodeInt(
             const BYTES = comptime std.math.divCeil(usize, NUM_BITS, 8) catch unreachable;
 
             const decoded: Int = try reader.readInt(Int, .big);
+            diag.ok(typ, "decode", BYTES, "{d}", .{decoded});
             return .{ .bytes_read = BYTES, .value = decoded };
         },
         .varnum => return decodeVarnum(Int, reader, diag),
@@ -850,17 +881,18 @@ fn decodeVarnum(comptime VarNum: type, reader: anytype, diag: Diag) !Decoded(Var
         decoded |= data << @intCast(7 * bytes);
         bytes += 1;
         if ((b & 0x80) == 0) {
+            diag.ok(@typeName(VarNum), "decode varnum", bytes, "{d}", .{decoded});
             return .{ .bytes_read = bytes, .value = decoded };
         } else if (bytes >= MAX_BYTES) {
             @branchHint(.unlikely);
-            diag.report(error.VarNumTooLong, @typeName(VarNum), "too many bytes while decoding var num", .{});
-            return error.VarNumTooLong;
+            diag.report(error.VarNumTooLarge, @typeName(VarNum), "too many bytes while decoding var num", .{});
+            return error.VarNumTooLarge;
         }
     }
 }
 
 fn decodeBool(reader: anytype, diag: Diag) !Decoded(bool) {
-    return .{
+    const out: Decoded(bool) = .{
         .bytes_read = 1,
         .value = switch (try reader.readByte()) {
             0x00 => false,
@@ -872,6 +904,8 @@ fn decodeBool(reader: anytype, diag: Diag) !Decoded(bool) {
             },
         },
     };
+    diag.ok(@typeName(bool), "decode", 1, "{any}", .{out.value});
+    return out;
 }
 
 fn decodeFloat(comptime Float: type, reader: anytype, diag: Diag) !Decoded(Float) {
@@ -892,7 +926,7 @@ fn decodeFloat(comptime Float: type, reader: anytype, diag: Diag) !Decoded(Float
         .signedness = .unsigned,
     } });
 
-    const int_decoded: Decoded(AsInt) = try decodeInt(AsInt, reader, diag, .default);
+    const int_decoded: Decoded(AsInt) = try decodeInt(AsInt, reader, diag, .default, @typeName(Float));
     const f = @as(Float, @bitCast(int_decoded.value));
     return .{ .bytes_read = int_decoded.bytes_read, .value = f };
 }
@@ -949,6 +983,7 @@ fn decodePointer(
                     // if Elem is u8, then decode bytes directly
                     if (Elem == u8) {
                         try reader.readNoEof(buf);
+                        diag.ok(@typeName(Data), "decode", N, "{s}", .{buf});
                         bytes_read += N;
                     } else {
                         // otherwise, decode each item individually
@@ -974,7 +1009,7 @@ fn decodePointer(
                     const allocated_ptr: NonConstPointer(Data) = try allocator.create(Payload);
                     errdefer allocator.destroy(allocated_ptr);
 
-                    const decoded_payload = try decode(Payload, reader, allocator, diag, encoding);
+                    const decoded_payload = try decode(Payload, reader, arena_allocator, diag, encoding);
                     allocated_ptr.* = decoded_payload.value;
                     return .{ .bytes_read = decoded_payload.bytes_read, .value = allocated_ptr };
                 },
@@ -994,6 +1029,7 @@ fn decodePointer(
                         };
                         errdefer allocator.free(dst);
                         bytes = dst.len;
+                        diag.ok(@typeName(Data), "decode", dst.len, "{s}", .{dst});
                     } else {
                         @compileError(@typeName(Data) ++ " cannot be decoded without length prefix (unsupported, but TODO)");
                     }
@@ -1006,6 +1042,7 @@ fn decodePointer(
                         reader,
                         try diag.child(.length_prefix),
                         lp.encoding,
+                        @typeName(Counter),
                     )).unwrap(&bytes));
                     if (count > encoding.max_items) {
                         @branchHint(.unlikely);
@@ -1035,6 +1072,7 @@ fn decodePointer(
                     if (Payload == u8) {
                         try reader.readNoEof(dst);
                         bytes += count;
+                        diag.ok(@typeName(Data), "decode", count, "{s}", .{dst});
                     } else {
                         for (dst, 0..) |*item, idx| {
                             item.* = (try decode(
@@ -1114,14 +1152,14 @@ fn decodeStructByFields(
     reader: anytype,
     allocator: *std.heap.ArenaAllocator,
     diag: Diag,
-    comptime encoding: StructByFieldsEncoding(Data),
+    comptime encoding: Encoding(Data),
 ) !Decoded(Data) {
     const struct_info = @typeInfo(Data).@"struct";
     var decoded_value: Data = undefined;
     var bytes: usize = 0;
 
     inline for (struct_info.fields) |struct_field| {
-        const field_encoding = @field(encoding, struct_field.name);
+        const field_encoding = comptime if (@hasField(Encoding(Data), struct_field.name)) @field(encoding, struct_field.name) else defaultEncoding(struct_field.type);
         const field_dcd = try decode(
             struct_field.type,
             reader,
@@ -1299,6 +1337,7 @@ fn decodeUnion(
     diag: Diag,
     comptime encoding: Encoding(Union),
 ) !Decoded(Union) {
+    const UnionEncodingT = @TypeOf(encoding);
     const union_info = @typeInfo(Union).@"union";
     if (union_info.tag_type == null) {
         @compileError(@typeName(Union) ++ " is untagged and is unsupported");
@@ -1319,7 +1358,8 @@ fn decodeUnion(
     inline for (union_info.fields, tag_info.fields) |union_field, enum_field| {
         if (enum_field.value == tag_int) {
             const Payload: type = union_field.type;
-            const payload_encoding: Encoding(Payload) = @field(encoding.fields, enum_field.name);
+            const field_encoding_provided = @hasField(UnionEncodingT, "fields") and @hasField(@TypeOf(encoding.fields), enum_field.name);
+            const payload_encoding = comptime if (field_encoding_provided) @field(encoding.fields, enum_field.name) else defaultEncoding(Payload);
             const payload: Payload = (try decode(
                 Payload,
                 reader,
@@ -1468,13 +1508,17 @@ test "encoding numeric tagged union" {
     );
 }
 
+const diag_log = std.log.scoped(.diag);
+
 pub const Diag = struct {
     state: ?*State = null,
     path: Path = .{},
 
+    pub const Error = error{DiagTooDeep};
+
     pub const Path = std.BoundedArray(PathComponent, 32);
 
-    pub fn child(diag: Diag, component: PathComponent) error{DiagTooDeep}!Diag {
+    pub fn child(diag: Diag, component: PathComponent) !Diag {
         if (diag.state == null) {
             return diag;
         }
@@ -1493,7 +1537,7 @@ pub const Diag = struct {
     pub fn report(
         diag: Diag,
         code: anyerror,
-        typ: []const u8,
+        comptime typ: []const u8,
         comptime msg: []const u8,
         args: anytype,
     ) void {
@@ -1509,6 +1553,27 @@ pub const Diag = struct {
                 .type = typ,
                 .message = msg_buf.toOwnedSlice() catch "error printing error... bro",
             });
+        }
+    }
+
+    pub fn ok(
+        diag: Diag,
+        comptime typ: []const u8,
+        comptime op: []const u8,
+        bytes: usize,
+        comptime fmt: []const u8,
+        args: anytype,
+    ) void {
+        if (diag.state) |state| {
+            var buf = std.ArrayList(u8).init(state.arena.allocator());
+            defer buf.deinit();
+
+            formatPath(diag.path, buf.writer()) catch {
+                diag_log.debug("{s} {s} = " ++ fmt ++ " ({d} bytes)", .{ typ, op } ++ args ++ .{bytes});
+                return;
+            };
+
+            diag_log.debug("{s} {s} {s} = " ++ fmt ++ " ({d} bytes)", .{ buf.items, typ, op } ++ args ++ .{bytes});
         }
     }
 
@@ -1540,22 +1605,9 @@ pub const Diag = struct {
             _ = fmt;
             _ = options;
 
-            const path_parts: []const PathComponent = r.at.constSlice();
-            for (path_parts) |component| {
-                switch (component) {
-                    .packet_length => try writer.writeAll("packet.length"),
-                    .packet_data_length => try writer.writeAll("packet.data_length"),
-                    .packet_id => try writer.writeAll("packet.id"),
-                    .packet_body => try writer.writeAll("packet.body"),
-                    .field => |field_name| try writer.print(".{s}", .{field_name}),
-                    .tag => try writer.writeAll("|Tag"),
-                    .payload => {},
-                    .length_prefix => try writer.writeAll("|LengthPrefix"),
-                    .optional_prefix => try writer.writeAll("|OptionalPrefix"),
-                    .index => |idx| try writer.print("[{d}]", .{idx}),
-                }
-            }
-            if (path_parts.len > 0) {
+            try formatPath(r.at, writer);
+
+            if (r.at.len > 0) {
                 try writer.writeAll(" ");
             }
             if (r.type.len > 0) {
@@ -1570,6 +1622,23 @@ pub const Diag = struct {
             );
         }
     };
+
+    fn formatPath(path: Path, writer: anytype) !void {
+        for (path.constSlice()) |component| {
+            switch (component) {
+                .packet_length => try writer.writeAll("packet.length"),
+                .packet_data_length => try writer.writeAll("packet.data_length"),
+                .packet_id => try writer.writeAll("packet.id"),
+                .packet_body => try writer.writeAll("packet.body"),
+                .field => |field_name| try writer.print(".{s}", .{field_name}),
+                .tag => try writer.writeAll("|Tag"),
+                .payload => {},
+                .length_prefix => try writer.writeAll("|LengthPrefix"),
+                .optional_prefix => try writer.writeAll("|OptionalPrefix"),
+                .index => |idx| try writer.print("[{d}]", .{idx}),
+            }
+        }
+    }
 
     pub const State = struct {
         reports: std.ArrayList(Report),
@@ -1629,3 +1698,85 @@ pub const Position = packed struct {
     z: i26,
     y: i12,
 };
+
+pub fn IdOr(comptime Payload: type) type {
+    return union {
+        id: i32,
+        other: Payload,
+
+        const Self = @This();
+
+        pub const CraftEncoding: type = Encoding(Payload);
+
+        pub fn craftEncode(
+            id_or: Self,
+            writer: anytype,
+            allocator: std.mem.Allocator,
+            diag: Diag,
+            comptime encoding: CraftEncoding,
+        ) !usize {
+            switch (id_or) {
+                .id => |id_value| {
+                    return encode(
+                        id_value,
+                        writer,
+                        allocator,
+                        diag,
+                        .varnum,
+                    );
+                },
+                .other => |payload| {
+                    var bytes_written: usize = 0;
+                    bytes_written += try encode(
+                        @as(i32, 0),
+                        writer,
+                        allocator,
+                        try diag.child(.{ .field = "id" }),
+                        .varnum,
+                    );
+                    bytes_written += try encode(
+                        payload,
+                        writer,
+                        allocator,
+                        try diag.child(.{ .field = "value" }),
+                        encoding,
+                    );
+                    return bytes_written;
+                },
+            }
+        }
+
+        pub fn craftDecode(
+            reader: anytype,
+            arena_allocator: *std.heap.ArenaAllocator,
+            diag: Diag,
+            comptime encoding: CraftEncoding,
+        ) !Decoded(Self) {
+            var bytes_read: usize = 0;
+            const id_value: i32 = (try decode(
+                i32,
+                reader,
+                arena_allocator,
+                try diag.child(.{ .field = "id" }),
+                .varnum,
+            )).unwrap(&bytes_read);
+
+            var out: Self = undefined;
+            if (id_value == 0) {
+                out = .{ .other = (try decode(
+                    Payload,
+                    reader,
+                    arena_allocator,
+                    try diag.child(.{ .field = "value" }),
+                    encoding,
+                )).unwrap(&bytes_read) };
+            } else {
+                out = .{ .id = id_value };
+            }
+            return .{
+                .bytes_read = bytes_read,
+                .value = out,
+            };
+        }
+    };
+}

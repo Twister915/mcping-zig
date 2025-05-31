@@ -5,7 +5,7 @@ const UUID = @import("UUID.zig");
 const util = @import("util.zig");
 const nbt = @import("nbt.zig");
 
-const MAX_IDENTIFIER_SIZE: usize = 0x7FFF;
+const MAX_IDENTIFIER_SIZE: usize = craft_io.MAX_IDENTIFIER_SIZE;
 
 // state = handshake
 pub const HandshakingPacket = struct {
@@ -143,26 +143,26 @@ pub const EncryptionRequestPacket = struct {
     pub const ENCODING: Encoding = .{ .server_id = .{ .max_items = 20 } };
 };
 
+pub const ProfileProperty = struct {
+    name: []const u8,
+    value: []const u8,
+    signature: ?[]const u8,
+
+    const Encoding = craft_io.Encoding(@This());
+    pub const ENCODING: Encoding = .{
+        .name = .{ .max_items = 0x40 },
+        .value = .{ .max_items = MAX_IDENTIFIER_SIZE },
+        .signature = .{ .max_items = 0x400 },
+    };
+};
+
 pub const LoginSuccessPacket = struct {
     uuid: UUID,
     username: []const u8,
-    properties: []const Property,
+    properties: []const ProfileProperty,
 
     const Encoding = craft_io.Encoding(@This());
     pub const ENCODING: Encoding = .{ .username = .{ .max_items = 0x10 } };
-
-    pub const Property = struct {
-        name: []const u8,
-        value: []const u8,
-        signature: ?[]const u8,
-
-        const PropertyEncoding = craft_io.Encoding(@This());
-        pub const ENCODING: PropertyEncoding = .{
-            .name = .{ .max_items = 0x40 },
-            .value = .{ .max_items = MAX_IDENTIFIER_SIZE },
-            .signature = .{ .max_items = 0x400 },
-        };
-    };
 };
 
 test "encode login success packet" {
@@ -453,6 +453,1264 @@ pub const ConfigResourcePackResponsePacket = struct {
     };
 };
 
+pub const IDSet = union(enum) {
+    tagged: []const u8,
+    ids: []const i32,
+
+    pub const CraftEncoding: type = void;
+    pub const ENCODING: CraftEncoding = {};
+
+    pub fn craftEncode(
+        id_set: IDSet,
+        writer: anytype,
+        allocator: std.mem.Allocator,
+        diag: craft_io.Diag,
+        comptime encoding: void,
+    ) !usize {
+        _ = encoding;
+        var bytes_written: usize = 0;
+        switch (id_set) {
+            .tagged => |tag_name| {
+                bytes_written += try craft_io.encode(
+                    @as(i32, 0),
+                    writer,
+                    allocator,
+                    try diag.child(.{ .field = "type" }),
+                    .varnum,
+                );
+                bytes_written += try craft_io.encode(
+                    tag_name,
+                    writer,
+                    allocator,
+                    try diag.child(.{ .field = "tag_name" }),
+                    .{ .max_items = MAX_IDENTIFIER_SIZE },
+                );
+            },
+            .ids => |id_list| {
+                bytes_written += try craft_io.encode(
+                    @as(i32, id_list.len + 1),
+                    writer,
+                    allocator,
+                    try diag.child(.{ .field = "type" }),
+                    .varnum,
+                );
+                bytes_written += try craft_io.encode(
+                    id_list,
+                    writer,
+                    allocator,
+                    try diag.child(.{ .field = "ids" }),
+                    .{},
+                );
+            },
+        }
+        return bytes_written;
+    }
+
+    pub fn craftDecode(
+        reader: anytype,
+        arena_allocator: *std.heap.ArenaAllocator,
+        diag: craft_io.Diag,
+        comptime encoding: CraftEncoding,
+    ) !craft_io.Decoded(IDSet) {
+        _ = encoding;
+
+        var bytes_read: usize = 0;
+        const typ: i32 = (try craft_io.decode(
+            i32,
+            reader,
+            arena_allocator,
+            try diag.child(.{ .field = "type" }),
+            .varnum,
+        )).unwrap(&bytes_read);
+
+        if (typ == 0) {
+            const tag_name = (try craft_io.decode(
+                []const u8,
+                reader,
+                arena_allocator,
+                try diag.child(.{ .field = "tag_name" }),
+                .{ .max_items = MAX_IDENTIFIER_SIZE },
+            )).unwrap(&bytes_read);
+            return .{
+                .value = .{ .tagged = tag_name },
+                .bytes_read = bytes_read,
+            };
+        } else {
+            const size: usize = @intCast(typ - 1);
+            const allocator = arena_allocator.allocator();
+            const id_items = try allocator.alloc(i32, size);
+            errdefer allocator.free(id_items);
+            for (id_items, 0..) |*item, idx| {
+                item.* = (try craft_io.decode(
+                    i32,
+                    reader,
+                    arena_allocator,
+                    try diag.child(.{ .index = idx }),
+                    .varnum,
+                )).unwrap(&bytes_read);
+            }
+            return .{
+                .value = .{ .ids = id_items },
+                .bytes_read = bytes_read,
+            };
+        }
+    }
+};
+
+pub const TextComponent = struct {
+    nbt_data: nbt.Tag,
+
+    pub const CraftEncoding: type = craft_io.Encoding(nbt.Tag);
+
+    pub fn craftEncode(
+        cmp: TextComponent,
+        writer: anytype,
+        allocator: std.mem.Allocator,
+        diag: craft_io.Diag,
+        comptime encoding: CraftEncoding,
+    ) !usize {
+        switch (cmp.nbt_data) {
+            inline .string, .compound => {
+                return craft_io.encode(cmp.nbt_data, writer, allocator, diag, encoding);
+            },
+            else => {
+                diag.report(
+                    error.BadNbtForTextComponent,
+                    @typeName(@This()),
+                    "text components are NBT tags, but only allowed to use string and compound tag types, this is a {any}",
+                    .{@as(nbt.TagType, cmp.nbt_data)},
+                );
+                return error.BadNbtForTextComponent;
+            },
+        }
+    }
+
+    pub fn craftDecode(
+        reader: anytype,
+        arena_allocator: *std.heap.ArenaAllocator,
+        diag: craft_io.Diag,
+        comptime encoding: CraftEncoding,
+    ) !craft_io.Decoded(TextComponent) {
+        var bytes_read: usize = 0;
+        const nbt_tag: nbt.Tag = (try craft_io.decode(
+            nbt.Tag,
+            reader,
+            arena_allocator,
+            diag,
+            encoding,
+        )).unwrap(&bytes_read);
+        switch (nbt_tag) {
+            inline .string, .compound => {
+                return .{
+                    .bytes_read = bytes_read,
+                    .value = .{ .nbt_data = nbt_tag },
+                };
+            },
+            else => {
+                diag.report(
+                    error.BadNbtForTextComponent,
+                    @typeName(@This()),
+                    "text components are NBT tags, but only allowed to use string and compound tag types, this is a {any}",
+                    .{@as(nbt.TagType, nbt_tag)},
+                );
+                return error.BadNbtForTextComponent;
+            },
+        }
+    }
+};
+
+// OK
+pub const BlockPredicate = struct {
+    blocks: ?IDSet,
+    properties: ?[]const Property,
+    nbt: ?nbt.Tag,
+    data_components: []const StructuredComponent,
+    partial_data_components: []const PartialDataComponentMatcher,
+};
+
+// OK
+pub const PartialDataComponentMatcher = struct {
+    type: enum(i32) {
+        damage = 0,
+        enchantments = 1,
+        stored_enchantments = 2,
+        potion_contents = 3,
+        custom_data = 4,
+        container = 5,
+        bundle_contents = 6,
+        firework_explosion = 7,
+        fireworks = 8,
+        writable_book_content = 9,
+        written_book_content = 10,
+        attribute_modifiers = 11,
+        trim = 12,
+        jukebox_playable = 13,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+    },
+    predicate: nbt.NamedTag,
+};
+
+pub const Property = struct {
+    name: []const u8,
+    range: Range,
+
+    pub const RangeType = enum(u8) {
+        min_max = 0,
+        exact = 1,
+    };
+
+    pub const Range = union(RangeType) {
+        min_max: struct {
+            min_value: []const u8,
+            max_value: []const u8,
+        },
+        exact: struct {
+            exact_value: []const u8,
+        },
+    };
+};
+
+pub const PotionEffect = struct {
+    type_id: i32,
+    details: Detail,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .type_id = .varnum,
+    };
+
+    pub const Detail = struct {
+        amplifier: i32,
+        duration: i32, // todo type safe infinite
+        ambient: bool,
+        show_particles: bool,
+        show_icon: bool,
+        hidden_effect: ?*const Detail,
+
+        pub const CraftEncoding: type = struct {
+            amplifier: craft_io.Encoding(i32) = .varnum,
+            duration: craft_io.Encoding(i32) = .varnum,
+        };
+    };
+};
+
+pub const SoundEvent = struct {
+    sound_name: []const u8,
+    fixed_range: ?f32,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .sound_name = .{ .max_items = MAX_IDENTIFIER_SIZE },
+    };
+};
+
+pub const ConsumeEffectType = enum(i32) {
+    apply_effects = 0,
+    remove_effects = 1,
+    clear_all_effects = 2,
+    teleport_randomly = 3,
+    play_sound = 4,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+};
+
+pub const ConsumeEffect = union(ConsumeEffectType) {
+    apply_effects: struct {
+        effects: []const PotionEffect,
+        probability: f32,
+    },
+    remove_effects: struct {
+        effects: IDSet,
+    },
+    clear_all_effects,
+    teleport_randomly: struct {
+        diameter: f32,
+    },
+    play_sound: struct {
+        sound: SoundEvent,
+    },
+};
+
+pub const TrimMaterial = struct {
+    suffix: []const u8,
+    overrides: []const struct {
+        armor_material_type: []const u8,
+        overidden_asset_name: []const u8,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .armor_material_type = .{ .max_items = MAX_IDENTIFIER_SIZE },
+        };
+    },
+    description: TextComponent,
+};
+
+pub const TrimPattern = struct {
+    asset_name: []const u8,
+    template_item: i32,
+    description: TextComponent,
+    decal: bool,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .template_item = .varnum,
+    };
+};
+
+pub const Instrument = struct {
+    sound_event: craft_io.IdOr(SoundEvent),
+    sound_range: f32,
+    range: f32,
+    description: TextComponent,
+};
+
+pub const JukeboxSong = struct {
+    sound_event: craft_io.IdOr(SoundEvent),
+    description: TextComponent,
+    duration: f32,
+    output: i32,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .output = .varnum,
+    };
+};
+
+pub const FireworkExplosion = struct {
+    shape: Shape,
+    colors: []const i32,
+    fade_colors: []const i32,
+    has_trail: bool,
+    has_twinkle: bool,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .colors = .{ .items = .varnum },
+        .fade_colors = .{ .items = .varnum },
+    };
+
+    pub const Shape = enum(i32) {
+        small_ball = 0,
+        large_ball = 1,
+        star = 2,
+        creeper = 3,
+        burst = 4,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+    };
+};
+
+pub const DyeColor = enum(i32) {
+    white = 0,
+    orange = 1,
+    magenta = 2,
+    light_blue = 3,
+    yellow = 4,
+    lime = 5,
+    pink = 6,
+    gray = 7,
+    light_gray = 8,
+    cyan = 9,
+    purple = 10,
+    blue = 11,
+    brown = 12,
+    green = 13,
+    red = 14,
+    black = 15,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+};
+
+pub const VariantSelection = struct {
+    variant: i32,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .variant = .varnum,
+    };
+};
+
+pub const PaintingVariant = struct {
+    width: i32,
+    height: i32,
+    asset_id: []const u8,
+    title: ?TextComponent,
+    author: ?TextComponent,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .asset_id = .{ .max_items = MAX_IDENTIFIER_SIZE },
+    };
+};
+
+pub const StructuredComponentType = enum(i32) {
+    custom_data = 0,
+    max_stack_size = 1,
+    max_damage = 2,
+    damage = 3,
+    unbreakable = 4,
+    custom_name = 5,
+    item_name = 6,
+    item_model = 7,
+    lore = 8,
+    rarity = 9,
+    enchantments = 10,
+    can_place_on = 11,
+    can_break = 12,
+    attribute_modifiers = 13,
+    custom_model_data = 14,
+    tooltip_display = 15,
+    repair_cost = 16,
+    creative_slot_block = 17,
+    enchantment_glint_override = 18,
+    intangible_projectile = 19,
+    food = 20,
+    consumable = 21,
+    use_remainder = 22,
+    use_cooldown = 23,
+    damage_resistant = 24,
+    tool = 25,
+    weapon = 26,
+    enchantable = 27,
+    equippable = 28,
+    repairable = 29,
+    glider = 30,
+    tooltip_style = 31,
+    death_protection = 32,
+    blocks_attacks = 33,
+    stored_enchantments = 34,
+    dyed_color = 35,
+    map_color = 36,
+    map_id = 37,
+    decorations = 38,
+    map_post_processing = 39,
+    charged_projectiles = 40,
+    bundle_contents = 41,
+    potion_contents = 42,
+    potion_duration_scale = 43,
+    suspicious_stew_effects = 44,
+    writable_book_content = 45,
+    written_book_content = 46,
+    trim = 47,
+    debug_stick_state = 48,
+    entity_data = 49,
+    bucket_entity_data = 50,
+    block_entity_data = 51,
+    instrument = 52,
+    provides_trim_material = 53,
+    ominous_bottle_amplifier = 54,
+    jukebox_playable = 55,
+    provides_banner_patterns = 56,
+    recipes = 57,
+    lodestone_tracker = 58,
+    firework_explosion = 59,
+    fireworks = 60,
+    profile = 61,
+    note_block_sound = 62,
+    banner_patterns = 63,
+    base_color = 64,
+    pot_decorations = 65,
+    container = 66,
+    block_state = 67,
+    bees = 68,
+    lock = 69,
+    container_loot = 70,
+    break_sound = 71,
+    villager_variant = 72,
+    wolf_variant = 73,
+    wolf_sound_variant = 74,
+    wolf_collar = 75,
+    fox_variant = 76,
+    salmon_size = 77,
+    parrot_variant = 78,
+    tropical_fish_pattern = 79,
+    tropical_fish_base_color = 80,
+    tropical_fish_pattern_color = 81,
+    mooshroom_variant = 82,
+    rabbit_variant = 83,
+    pig_variant = 84,
+    cow_variant = 85,
+    chicken_variant = 86,
+    frog_variant = 87,
+    horse_variant = 88,
+    painting_variant = 89,
+    llama_variant = 90,
+    axolotl_variant = 91,
+    cat_variant = 92,
+    cat_collar = 93,
+    sheep_color = 94,
+    shulker_color = 95,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+};
+
+pub const BookPage = struct {
+    raw_content: TextComponent,
+    filtered_content: ?TextComponent,
+};
+
+pub fn IdentifierOr(
+    comptime AltType: type,
+    comptime alt_default_encoding: craft_io.Encoding(AltType),
+) type {
+    const M = enum(i8) {
+        identifier = 0,
+        payload = 1,
+    };
+
+    return union(M) {
+        identifier: []const u8,
+        payload: AltType,
+
+        pub const Mode = M;
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .fields = .{
+                .identifier = .{ .max_items = MAX_IDENTIFIER_SIZE },
+                .payload = alt_default_encoding,
+            },
+        };
+    };
+}
+
+pub const StructuredComponent = union(StructuredComponentType) {
+    custom_data: nbt.NamedTag,
+    max_stack_size: i32,
+    max_damage: i32,
+    damage: i32,
+    unbreakable,
+    custom_name: TextComponent,
+    item_name: TextComponent,
+    item_model: []const u8,
+    lore: struct {
+        lines: []const TextComponent,
+    },
+    rarity: enum(i32) {
+        common = 0,
+        uncommon = 1,
+        rare = 2,
+        epic = 3,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+    },
+    enchantments: []const struct {
+        enchantment_id: i32,
+        level: i32,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .enchantment_id = .varnum,
+            .level = .varnum,
+        };
+    },
+    can_place_on: []const BlockPredicate,
+    can_break: []const BlockPredicate,
+    attribute_modifiers: []const struct {
+        attribute_id: i32,
+        modifier_id: []const u8,
+        value: f64,
+        operation: enum(i32) {
+            add = 0,
+            multiply_base = 1,
+            multiply_total = 2,
+
+            pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+        },
+        slot: enum(i32) {
+            any = 0,
+            main_hand = 1,
+            off_hand = 2,
+            hand = 3,
+            feet = 4,
+            legs = 5,
+            chest = 6,
+            head = 7,
+            armor = 8,
+            body = 9,
+
+            pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+        },
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .attribute_id = .varnum,
+        };
+    },
+    custom_model_data: struct {
+        floats: []const f32,
+        flags: []const bool,
+        strings: []const []const u8,
+        colors: []const i32,
+    },
+    tooltip_display: struct {
+        hide_tooltip: bool,
+        hidden_components: []const i32,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .hidden_components = .{ .items = .varnum },
+        };
+    },
+    repair_cost: i32,
+    creative_slot_block,
+    enchantment_glint_override: struct { has_glint: bool },
+    intangible_projectile: nbt.NamedTag,
+    food: struct {
+        nutrition: i32,
+        saturation_modifier: f32,
+        can_always_eat: bool,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .nutrition = .varnum,
+        };
+    },
+    consumable: struct {
+        consume_seconds: f32,
+        animation: enum(i32) {
+            none = 0,
+            eat = 1,
+            drink = 2,
+            block = 3,
+            bow = 4,
+            spear = 5,
+            crossbow = 6,
+            spyglass = 7,
+            toot_horn = 8,
+            brush = 9,
+
+            pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+        },
+        sound: craft_io.IdOr(SoundEvent),
+        has_consume_particles: bool,
+        effects: []const ConsumeEffect,
+    },
+    use_remainder: struct {
+        remainder: Slot,
+    },
+    use_cooldown: struct {
+        seconds: f32,
+        cooldown_group: ?[]const u8,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .cooldown_group = .{ .max_items = MAX_IDENTIFIER_SIZE },
+        };
+    },
+    damage_resistant: struct {
+        types: []const u8,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .types = .{ .max_items = MAX_IDENTIFIER_SIZE },
+        };
+    },
+    tool: struct {
+        rules: []const Rule,
+        default_mining_speed: f32,
+        damage_per_block: i32,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .damage_per_block = .varnum,
+        };
+
+        pub const Rule = struct {
+            blocks: IDSet,
+            speed: ?f32,
+            correct_drop_for_blocks: ?bool,
+        };
+    },
+    weapon: struct {
+        damage_per_attack: i32,
+        disable_blocking_for: f32,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .damage_per_attack = .varnum,
+        };
+    },
+    enchantable: i32,
+    equippable: struct {
+        slot: enum(i32) {
+            main_hand = 0,
+            feet = 1,
+            legs = 2,
+            chest = 3,
+            head = 4,
+            offhand = 5,
+            body = 6,
+
+            pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+        },
+        equip_sound: craft_io.IdOr(SoundEvent),
+        model: ?[]const u8,
+        camera_overlay: ?[]const u8,
+        allowed_entities: ?IDSet,
+        dispensable: bool,
+        swappable: bool,
+        damage_on_hurt: bool,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .model = .{ .max_items = MAX_IDENTIFIER_SIZE },
+            .camera_overlay = .{ .max_items = MAX_IDENTIFIER_SIZE },
+        };
+    },
+    repairable: IDSet,
+    glider,
+    tooltip_style: struct {
+        style: []const u8,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .style = .{ .max_items = MAX_IDENTIFIER_SIZE },
+        };
+    },
+    death_protection: []const ConsumeEffect,
+    blocks_attacks: struct {
+        block_delay_seconds: f32,
+        disable_cooldown_scale: f32,
+        damage_reductions: []const struct {
+            horizontal_blocking_angle: f32,
+            type: ?IDSet,
+            base: f32,
+            factor: f32,
+        },
+        item_damage_threshold: f32,
+        item_damage_base: f32,
+        item_damage_factor: f32,
+        bypassed_by: ?[]const u8,
+        block_sound: ?craft_io.IdOr(SoundEvent),
+        disable_sound: ?craft_io.IdOr(SoundEvent),
+    },
+    stored_enchantments: []const struct {
+        type_id: i32,
+        level: i32,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .type_id = .varnum,
+            .level = .varnum,
+        };
+    },
+    dyed_color: struct { color: i32 },
+    map_color: struct { color: i32 },
+    map_id: struct {
+        id: i32,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{ .id = .varnum };
+    },
+    decorations: nbt.NamedTag,
+    map_post_processing: enum(i32) {
+        lock = 0,
+        scale = 1,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+    },
+    charged_projectiles: []const Slot,
+    bundle_contents: []const Slot,
+    potion_contents: struct {
+        potion_id: ?i32,
+        custom_color: ?i32,
+        custom_effects: []const PotionEffect,
+        custom_name: []const u8,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .potion_id = .varnum,
+            .custom_color = .varnum,
+        };
+    },
+    potion_duration_scale: struct {
+        effect_multiplier: f32,
+    },
+    suspicious_stew_effects: []const struct {
+        type_id: i32,
+        duration: i32,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .type_id = .varnum,
+            .duration = .varnum,
+        };
+    },
+    writable_book_content: struct {
+        pages: []const BookPage,
+    },
+    written_book_content: struct {
+        raw_title: []const u8,
+        filtered_title: ?[]const u8,
+        author: []const u8,
+        generation: i32,
+        pages: []const BookPage,
+        resolved: bool,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .raw_title = .{ .max_items = 32 },
+            .filtered_title = .{ .max_items = 32 },
+            .generation = .varnum,
+        };
+    },
+    trim: struct {
+        material: craft_io.IdOr(TrimMaterial),
+        pattern: craft_io.IdOr(TrimPattern),
+    },
+    debug_stick_state: nbt.NamedTag,
+    entity_data: nbt.NamedTag,
+    bucket_entity_data: nbt.NamedTag,
+    block_entity_data: nbt.NamedTag,
+    instrument: craft_io.IdOr(Instrument),
+    provides_trim_material: IdentifierOr(craft_io.IdOr(TrimMaterial), .{}),
+    ominous_bottle_amplifier: struct {
+        amplifier: i32,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .amplifier = .varnum,
+        };
+    },
+    jukebox_playable: IdentifierOr(craft_io.IdOr(JukeboxSong), .{}),
+    provides_banner_patterns: struct {
+        key: []const u8,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .key = .{ .max_items = MAX_IDENTIFIER_SIZE },
+        };
+    },
+    recipes: nbt.NamedTag,
+    lodestone_tracker: struct {
+        global_position: ?struct {
+            dimension: []const u8,
+            position: craft_io.Position,
+
+            pub const ENCODING: craft_io.Encoding(@This()) = .{
+                .dimension = .{ .max_items = MAX_IDENTIFIER_SIZE },
+            };
+        },
+        tracked: bool,
+    },
+    firework_explosion: FireworkExplosion,
+    fireworks: struct {
+        flight_duration: i32,
+        explosions: []const FireworkExplosion,
+    },
+    profile: struct {
+        name: ?[]const u8,
+        uuid: ?UUID,
+        properties: []const ProfileProperty,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .name = .{ .max_items = 16 },
+        };
+    },
+    note_block_sound: struct {
+        sound: []const u8,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .sound = .{ .max_items = MAX_IDENTIFIER_SIZE },
+        };
+    },
+    banner_patterns: struct {
+        layers: []const struct {
+            // FIXME this is offset by 1 if we decode a pattern type non-0
+            pattern: craft_io.IdOr(struct {
+                asset_id: []const u8,
+                translation_key: []const u8,
+
+                pub const ENCODING: craft_io.Encoding(@This()) = .{
+                    .asset_id = .{ .max_items = MAX_IDENTIFIER_SIZE },
+                };
+            }),
+            color: DyeColor,
+        },
+    },
+    base_color: DyeColor,
+    pot_decorations: struct {
+        decorations: []const i32,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .decorations = .{ .max_items = 4 },
+        };
+    },
+    container: struct {
+        items: []const Slot,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .items = .{ .max_items = 256 },
+        };
+    },
+    block_state: []const struct {
+        name: []const u8,
+        value: []const u8,
+    },
+    bees: []const struct {
+        entity_data: nbt.NamedTag,
+        ticks_in_hive: i32,
+        min_ticks_in_hive: i32,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .ticks_in_hive = .varnum,
+            .min_ticks_in_hive = .varnum,
+        };
+    },
+    lock: TextComponent, // FIXME doesn't match wiki, but is correct
+    container_loot: nbt.NamedTag,
+    break_sound: craft_io.IdOr(SoundEvent),
+    villager_variant: VariantSelection,
+    wolf_variant: VariantSelection,
+    wolf_sound_variant: VariantSelection,
+    wolf_collar: DyeColor,
+    fox_variant: enum(i32) {
+        red = 0,
+        snow = 1,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+    },
+    salmon_size: enum(i32) {
+        small = 0,
+        medium = 1,
+        large = 2,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+    },
+    parrot_variant: VariantSelection,
+    tropical_fish_pattern: enum(i32) {
+        kob = 0,
+        sunstreak = 1,
+        snooper = 2,
+        dasher = 3,
+        brinely = 4,
+        spotty = 5,
+        flopper = 6,
+        stripey = 7,
+        glitter = 8,
+        blockfish = 9,
+        betty = 10,
+        clayfish = 11,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+    },
+    tropical_fish_base_color: DyeColor,
+    tropical_fish_pattern_color: DyeColor,
+    mooshroom_variant: enum(i32) {
+        red = 0,
+        brown = 1,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+    },
+    rabbit_variant: enum(i32) {
+        brown = 0,
+        white = 1,
+        black = 2,
+        white_splotched = 3,
+        gold = 4,
+        salt = 5,
+        evil = 6,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+    },
+    pig_variant: VariantSelection,
+    cow_variant: VariantSelection,
+    chicken_variant: IdentifierOr(i32, .varnum),
+    frog_variant: VariantSelection,
+    horse_variant: enum(i32) {
+        white = 0,
+        creamy = 1,
+        chestnut = 2,
+        brown = 3,
+        black = 4,
+        gray = 5,
+        dark_brown = 6,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+    },
+    painting_variant: PaintingVariant,
+    llama_variant: enum(i32) {
+        creamy = 0,
+        white = 1,
+        brown = 2,
+        gray = 3,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+    },
+    axolotl_variant: enum(i32) {
+        lucy = 0,
+        wild = 1,
+        gold = 2,
+        cyan = 3,
+        blue = 4,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+    },
+    cat_variant: VariantSelection,
+    cat_collar: DyeColor,
+    sheep_color: DyeColor,
+    shulker_color: DyeColor,
+
+    pub const CraftEncoding: type = struct {
+        tag: craft_io.Encoding(i32) = .varnum,
+        fields: struct {
+            max_stack_size: craft_io.Encoding(i32) = .varnum,
+            max_damage: craft_io.Encoding(i32) = .varnum,
+            damage: craft_io.Encoding(i32) = .varnum,
+            repair_cost: craft_io.Encoding(i32) = .varnum,
+            enchantable: craft_io.Encoding(i32) = .varnum,
+        } = .{},
+    };
+
+    pub const ENCODING: CraftEncoding = .{};
+};
+
+pub const Slot = struct {
+    count: i32,
+    data: ?SlotData,
+
+    pub const CraftEncoding: type = void;
+
+    pub fn craftEncode(
+        slot: Slot,
+        writer: anytype,
+        allocator: std.mem.Allocator,
+        diag: craft_io.Diag,
+        comptime encoding: CraftEncoding,
+    ) !usize {
+        _ = encoding;
+        var bytes_written: usize = 0;
+        bytes_written += try craft_io.encode(
+            slot.count,
+            writer,
+            allocator,
+            try diag.child(.{ .field = "count" }),
+            .varnum,
+        );
+        if (slot.count > 0) {
+            if (slot.data) |payload| {
+                bytes_written += try craft_io.encode(
+                    payload,
+                    writer,
+                    allocator,
+                    diag,
+                    {},
+                );
+            } else {
+                diag.report(
+                    error.NonEmptySlotHasData,
+                    @typeName(@This()),
+                    "slot data has count of {d} but doesn't have associated data",
+                    .{slot.count},
+                );
+                return error.NonEmptySlotHasData;
+            }
+        }
+        return bytes_written;
+    }
+
+    pub fn craftDecode(
+        reader: anytype,
+        arena_allocator: *std.heap.ArenaAllocator,
+        diag: craft_io.Diag,
+        comptime encoding: CraftEncoding,
+    ) !craft_io.Decoded(Slot) {
+        _ = encoding;
+        var bytes_read: usize = 0;
+        var out: Slot = undefined;
+        out.count = (try craft_io.decode(
+            i32,
+            reader,
+            arena_allocator,
+            try diag.child(.{ .field = "count" }),
+            .varnum,
+        )).unwrap(&bytes_read);
+        if (out.count == 0) {
+            out.data = null;
+        } else {
+            out.data = (try craft_io.decode(
+                SlotData,
+                reader,
+                arena_allocator,
+                diag,
+                {},
+            )).unwrap(&bytes_read);
+        }
+        return .{
+            .value = out,
+            .bytes_read = bytes_read,
+        };
+    }
+};
+
+pub const SlotData = struct {
+    item_id: i32,
+    components_to_add: []const StructuredComponent,
+    components_to_remove: []const StructuredComponentType,
+
+    pub const CraftEncoding: type = void;
+
+    pub fn craftEncode(
+        slot: SlotData,
+        writer: anytype,
+        allocator: std.mem.Allocator,
+        diag: craft_io.Diag,
+        comptime encoding: CraftEncoding,
+    ) !usize {
+        _ = encoding;
+        var bytes_written: usize = 0;
+        bytes_written += try craft_io.encode(
+            slot.item_id,
+            writer,
+            allocator,
+            try diag.child(.{ .field = "item_id" }),
+            .varnum,
+        );
+
+        const components_to_add_diag = try diag.child(.{ .field = "components_to_add" });
+        const components_to_remove_diag = try diag.child(.{ .field = "components_to_remove" });
+
+        bytes_written += try craft_io.encode(
+            slot.components_to_add.len,
+            writer,
+            allocator,
+            try components_to_add_diag.child(.length_prefix),
+            .varnum,
+        );
+
+        bytes_written += try craft_io.encode(
+            slot.components_to_remove.len,
+            writer,
+            allocator,
+            try components_to_remove_diag.child(.length_prefix),
+            .varnum,
+        );
+
+        bytes_written += try craft_io.encode(
+            slot.components_to_add,
+            writer,
+            allocator,
+            components_to_add_diag,
+            .{ .length = .disabled, .items = .{} },
+        );
+
+        bytes_written += try craft_io.encode(
+            slot.components_to_remove,
+            writer,
+            allocator,
+            components_to_remove_diag,
+            .{ .length = .disabled, .items = .{} },
+        );
+
+        return bytes_written;
+    }
+
+    pub fn craftDecode(
+        reader: anytype,
+        arena_allocator: *std.heap.ArenaAllocator,
+        diag: craft_io.Diag,
+        comptime encoding: CraftEncoding,
+    ) !craft_io.Decoded(SlotData) {
+        _ = encoding;
+        var bytes_read: usize = 0;
+        const item_id: i32 = (try craft_io.decode(
+            i32,
+            reader,
+            arena_allocator,
+            try diag.child(.{ .field = "item_id" }),
+            .varnum,
+        )).unwrap(&bytes_read);
+
+        const components_to_add_diag = try diag.child(.{ .field = "components_to_add" });
+        const components_to_remove_diag = try diag.child(.{ .field = "components_to_remove" });
+
+        const num_components_to_add = (try craft_io.decode(
+            i32,
+            reader,
+            arena_allocator,
+            try components_to_add_diag.child(.length_prefix),
+            .varnum,
+        )).unwrap(&bytes_read);
+
+        const num_components_to_remove = (try craft_io.decode(
+            i32,
+            reader,
+            arena_allocator,
+            try components_to_remove_diag.child(.length_prefix),
+            .varnum,
+        )).unwrap(&bytes_read);
+
+        var out: @This() = undefined;
+        out.item_id = item_id;
+
+        const allocator = arena_allocator.allocator();
+        if (num_components_to_add == 0) {
+            out.components_to_add = &.{};
+        } else {
+            const components_to_add_buf = try allocator.alloc(StructuredComponent, @intCast(num_components_to_add));
+            errdefer allocator.free(components_to_add_buf);
+
+            for (components_to_add_buf, 0..) |*item, idx| {
+                item.* = (try craft_io.decode(
+                    StructuredComponent,
+                    reader,
+                    arena_allocator,
+                    try components_to_add_diag.child(.{ .index = idx }),
+                    craft_io.defaultEncoding(StructuredComponent),
+                )).unwrap(&bytes_read);
+            }
+            out.components_to_add = components_to_add_buf;
+        }
+
+        if (num_components_to_remove == 0) {
+            out.components_to_remove = &.{};
+        } else {
+            const components_to_remove_buf = try allocator.alloc(StructuredComponentType, @intCast(num_components_to_add));
+            errdefer allocator.free(components_to_remove_buf);
+
+            for (components_to_remove_buf, 0..) |*item, idx| {
+                item.* = (try craft_io.decode(
+                    StructuredComponentType,
+                    reader,
+                    arena_allocator,
+                    try components_to_remove_diag.child(.{ .index = idx }),
+                    craft_io.defaultEncoding(StructuredComponentType),
+                )).unwrap(&bytes_read);
+            }
+            out.components_to_remove = components_to_remove_buf;
+        }
+
+        return .{
+            .value = out,
+            .bytes_read = bytes_read,
+        };
+    }
+};
+
+pub const SlotDisplayType = enum(i32) {
+    empty = 0,
+    any_fuel = 1,
+    item = 2,
+    item_stack = 3,
+    tag = 4,
+    smithing_trim = 5,
+    with_remainder = 6,
+    composite = 7,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+};
+
+pub const SlotDisplay = union(SlotDisplayType) {
+    empty,
+    any_fuel,
+    item: struct {
+        type_id: i32,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .type_id = .varnum,
+        };
+    },
+    item_stack: Slot,
+    tag: struct {
+        tag: []const u8,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .tag = .{ .max_items = MAX_IDENTIFIER_SIZE },
+        };
+    },
+    smithing_trim: struct {
+        base: *const SlotDisplay,
+        material: *const SlotDisplay,
+        pattern: *const SlotDisplay,
+    },
+    with_remainder: struct {
+        ingredient: *const SlotDisplay,
+        remainder: *const SlotDisplay,
+    },
+    composite: struct {
+        options: []const SlotDisplay,
+    },
+
+    pub const CraftEncoding = struct {
+        tag: craft_io.Encoding(SlotDisplayType) = craft_io.defaultEncoding(SlotDisplayType),
+    };
+};
+
 pub const PlayLoginPacket = struct {
     entity_id: i32,
     is_hardcore: bool,
@@ -664,17 +1922,43 @@ pub const PlayMapDataPacket = struct {
 };
 
 pub const PlayChangeDifficultyPacket = struct {
-    difficulty: enum(u8) { peaceful, easy, normal, hard },
+    difficulty: Difficulty,
     locked: bool,
+
+    pub const Difficulty = enum(u8) { peaceful, easy, normal, hard };
 };
 
 pub const PlayPlayerAbilitiesPacket = struct {
-    flags: packed struct {
+    flags: Flags,
+    flying_speed: f32,
+    field_of_view_modifier: f32,
+
+    pub const Flags = packed struct {
         invulnerable: bool,
         flying: bool,
         allow_flying: bool,
         instant_break: bool,
+    };
+};
+
+pub const PlaySetHeldItemPacket = struct {
+    slot: i32,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{ .slot = .varnum };
+};
+
+pub const PlayUpdateRecipesPacket = struct {
+    property_sets: []const struct {
+        property_set_id: []const u8,
+        item_ids: []const i32,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .property_set_id = .{ .max_items = MAX_IDENTIFIER_SIZE },
+            .item_ids = .{ .items = .varnum },
+        };
     },
-    flying_speed: f32,
-    field_of_view_modifier: f32,
+    stonecutter_recipes: []const struct {
+        ingredients: IDSet,
+        slot_display: SlotDisplay,
+    },
 };

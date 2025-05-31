@@ -133,6 +133,7 @@ fn readPacketFrom(conn: *Conn, reader: anytype, diag: craft_io.Diag) !ReadPkt {
         reader,
         try diag.child(.packet_length),
         .varnum,
+        "i32",
     );
     const pkt_length: usize = @intCast(pkt_length_decoded.value);
     // start tracking how many bytes we read off the wire, and how many bytes are left
@@ -154,6 +155,7 @@ fn readPacketFrom(conn: *Conn, reader: anytype, diag: craft_io.Diag) !ReadPkt {
             counting_reader,
             try diag.child(.packet_data_length),
             .varnum,
+            "i32",
         );
         const data_length: usize = @intCast(data_length_decoded.value);
         bytes_read += data_length_decoded.bytes_read;
@@ -213,7 +215,13 @@ fn readPacketWithLengthFrom(conn: *Conn, reader: anytype, diag: craft_io.Diag, s
     bytes_decoded += size;
 
     var id_payload_stream = std.io.fixedBufferStream(id_and_payload);
-    const id_decoded = try craft_io.decodeInt(i32, id_payload_stream.reader(), try diag.child(.packet_id), .varnum);
+    const id_decoded = try craft_io.decodeInt(
+        i32,
+        id_payload_stream.reader(),
+        try diag.child(.packet_id),
+        .varnum,
+        "i32",
+    );
     const id = id_decoded.value;
     const payload = id_and_payload[id_decoded.bytes_read..]; // skip the bytes for the ID
 
