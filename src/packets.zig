@@ -1962,3 +1962,157 @@ pub const PlayUpdateRecipesPacket = struct {
         slot_display: SlotDisplay,
     },
 };
+
+pub const PlayEntityEventPacket = struct {
+    entity_id: i32,
+    entity_status: u8,
+};
+
+pub const PlayRecipeBookSettingsPacket = struct {
+    crafting_recipe_book: BookSettings,
+    smelting_recipe_book: BookSettings,
+    blast_furnace_book: BookSettings,
+    smoker_recipe_book: BookSettings,
+
+    const BookSettings = struct {
+        open: bool,
+        filter_active: bool,
+    };
+};
+
+pub const RecipeDisplayType = enum(i32) {
+    crafting_shapeless = 0,
+    crafting_shaped = 1,
+    furnace = 2,
+    stonecutter = 3,
+    smithing = 4,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+};
+
+pub const RecipeDisplay = union(RecipeDisplayType) {
+    crafting_shapeless: struct {
+        ingredients: []const SlotDisplay,
+        result: SlotDisplay,
+        crafting_station: SlotDisplay,
+    },
+    crafting_shaped: struct {
+        width: i32,
+        height: i32,
+        ingredients: []const SlotDisplay,
+        result: SlotDisplay,
+        crafting_station: SlotDisplay,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .width = .varnum,
+            .height = .varnum,
+        };
+    },
+    furnace: struct {
+        ingredient: SlotDisplay,
+        fuel: SlotDisplay,
+        crafting_station: SlotDisplay,
+        cooking_time: i32,
+        experience: f32,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .cooking_time = .varnum,
+        };
+    },
+    stonecutter: struct {
+        ingredient: SlotDisplay,
+        result: SlotDisplay,
+        crafting_station: SlotDisplay,
+    },
+    smithing: struct {
+        template: SlotDisplay,
+        base: SlotDisplay,
+        addition: SlotDisplay,
+        result: SlotDisplay,
+        crafting_station: SlotDisplay,
+    },
+};
+
+pub const PlayRecipeBookAddPacket = struct {
+    recipies: []const struct {
+        recipe_id: i32,
+        display: RecipeDisplay,
+        group_id: i32,
+        category_id: i32,
+        ingredients: ?[]const IDSet,
+        flags: packed struct {
+            show_notification: bool,
+            highlight_as_new: bool,
+        },
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .recipe_id = .varnum,
+            .category_id = .varnum,
+            .group_id = .varnum,
+        };
+    },
+    replace: bool,
+};
+
+pub fn Vector3(comptime Payload: type) type {
+    return struct {
+        x: Payload,
+        y: Payload,
+        z: Payload,
+    };
+}
+
+pub fn PackedVector3(comptime Payload: type) type {
+    return packed struct {
+        x: Payload,
+        y: Payload,
+        z: Payload,
+    };
+}
+
+pub const PlaySynchronizePlayerPositionPacket = struct {
+    teleport_id: i32,
+    position: Vector3(f64),
+    velocity: Vector3(f64),
+    yaw: f32,
+    pitch: f32,
+    flags: packed struct {
+        relative_position: PackedVector3(bool),
+        relative_yaw: bool,
+        relative_pitch: bool,
+        relative_velocity: PackedVector3(bool),
+        rotate_velocity_before_applying: bool,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{ .as_int = .{ .bits = 32 } };
+    },
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .teleport_id = .varnum,
+    };
+};
+
+pub const PlayServerDataPacket = struct {
+    motd: TextComponent,
+    icon: ?[]u8,
+};
+
+pub const PlaySystemChatMessagePacket = struct {
+    message: TextComponent,
+    overlay: bool,
+};
+
+pub const PlayUseItemPacket = struct {
+    hand: enum(i32) {
+        main = 0,
+        off = 1,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+    },
+    sequence: i32,
+    yaw: f32,
+    pitch: f32,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .sequence = .varnum,
+    };
+};

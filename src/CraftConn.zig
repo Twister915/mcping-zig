@@ -3,7 +3,7 @@ const net = std.net;
 const craft_io = @import("io.zig");
 const cfb8 = @import("cfb8.zig");
 
-const BUF_SIZE = 256;
+const BUF_SIZE = 4096;
 const BufReader = std.io.BufferedReader(BUF_SIZE, net.Stream.Reader);
 
 const log = std.log.scoped(.craft_conn);

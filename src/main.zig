@@ -14,7 +14,7 @@ test {
 }
 
 // turn this on (and build with runtime_safety = true) to see EVERYTHING
-pub const DIAG_REPORT_OK: bool = true;
+pub const DIAG_REPORT_OK: bool = false;
 
 pub const std_options: std.Options = .{
     .log_level = if (std.debug.runtime_safety) .debug else .info,
@@ -442,7 +442,19 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
                 const change_difficulty_packet = try play_packet.decodeAs(packets.PlayChangeDifficultyPacket, &arena_allocator, diag);
                 defer _ = arena_allocator.reset(.retain_capacity);
 
-                log.debug("change difficulty to -> {any} (locked? {any})", .{ change_difficulty_packet.difficulty, change_difficulty_packet.locked });
+                log.debug(
+                    "change difficulty to -> {any} (locked? {any})",
+                    .{ change_difficulty_packet.difficulty, change_difficulty_packet.locked },
+                );
+            },
+            0x1E => {
+                const entity_event_packet = try play_packet.decodeAs(packets.PlayEntityEventPacket, &arena_allocator, diag);
+                defer _ = arena_allocator.reset(.retain_capacity);
+
+                log.debug(
+                    "entity {d} has status {d}",
+                    .{ entity_event_packet.entity_id, entity_event_packet.entity_status },
+                );
             },
             0x2C => {
                 const map_data = try play_packet.decodeAs(packets.PlayMapDataPacket, &arena_allocator, diag);
@@ -462,11 +474,43 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
 
                 log.debug("player abilities set -> {any}", .{player_abilities_packet});
             },
+            0x41 => {
+                const synchronize_player_position_packet = try play_packet.decodeAs(packets.PlaySynchronizePlayerPositionPacket, &arena_allocator, diag);
+                defer _ = arena_allocator.reset(.retain_capacity);
+
+                log.debug("player tp packet -> {any}", .{synchronize_player_position_packet});
+            },
+            0x43 => {
+                const recipe_book_add_packet = try play_packet.decodeAs(packets.PlayRecipeBookAddPacket, &arena_allocator, diag);
+                defer _ = arena_allocator.reset(.retain_capacity);
+
+                for (recipe_book_add_packet.recipies) |recipe| {
+                    log.debug("added recipe -> {any}", .{recipe});
+                }
+            },
+            0x45 => {
+                const recipe_book_settings_packet = try play_packet.decodeAs(packets.PlayRecipeBookSettingsPacket, &arena_allocator, diag);
+                defer _ = arena_allocator.reset(.retain_capacity);
+
+                log.debug("recipe_book_settings --> {any}", .{recipe_book_settings_packet});
+            },
+            0x4F => {
+                const server_data_packet = try play_packet.decodeAs(packets.PlayServerDataPacket, &arena_allocator, diag);
+                defer _ = arena_allocator.reset(.retain_capacity);
+
+                log.debug("server_data --> .motd = {any}, .icon = {d} bytes", .{ server_data_packet.motd, if (server_data_packet.icon) |i| i.len else 0 });
+            },
             0x62 => {
                 const held_item_packet = try play_packet.decodeAs(packets.PlaySetHeldItemPacket, &arena_allocator, diag);
                 defer _ = arena_allocator.reset(.retain_capacity);
 
                 log.debug("set held item slot to {d}", .{held_item_packet.slot});
+            },
+            0x72 => {
+                const system_chat_message_packet = try play_packet.decodeAs(packets.PlaySystemChatMessagePacket, &arena_allocator, diag);
+                defer _ = arena_allocator.reset(.retain_capacity);
+
+                log.debug("system chat message: {any}", .{system_chat_message_packet.message});
             },
             0x7E => {
                 const update_recipes_packet = try play_packet.decodeAs(packets.PlayUpdateRecipesPacket, &arena_allocator, diag);

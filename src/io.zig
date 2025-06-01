@@ -147,6 +147,7 @@ pub fn Encoding(comptime Payload: type) type {
 
     const payload_info = @typeInfo(Payload);
 
+    // u6 -> u8, u14 -> u16
     if (payload_info == .int) {
         const ByteAligned = std.math.ByteAlignedInt(Payload);
         if (ByteAligned != Payload) {
@@ -197,7 +198,13 @@ pub fn defaultEncoding(comptime Payload: type) Encoding(Payload) {
         .@"enum" => defaultEncoding(WireTagFor(Payload)),
         .@"struct" => |struct_info| {
             if (struct_info.backing_integer) |BackingInteger| {
-                return .{ .as_int = defaultEncoding(BackingInteger) };
+                comptime var int_encoding: IntEncoding = undefined;
+                if (Encoding(BackingInteger) == IntEncoding) {
+                    int_encoding = defaultEncoding(BackingInteger);
+                } else {
+                    int_encoding = .default;
+                }
+                return .{ .as_int = .{ .bits = @bitSizeOf(BackingInteger), .encoding = int_encoding } };
             } else {
                 return .{};
             }
@@ -215,10 +222,13 @@ pub fn defaultEncoding(comptime Payload: type) Encoding(Payload) {
 
 fn StructEncoding(comptime Struct: type) type {
     const struct_info = @typeInfo(Struct).@"struct";
-    if (struct_info.backing_integer) |BackingInteger| {
+    if (struct_info.backing_integer != null) {
         return union(enum) {
             by_fields: StructByFieldsEncoding(Struct),
-            as_int: Encoding(BackingInteger),
+            as_int: struct {
+                bits: comptime_int,
+                encoding: IntEncoding = .default,
+            },
         };
     } else {
         return StructByFieldsEncoding(Struct);
@@ -520,15 +530,25 @@ fn encodeStruct(
 ) !usize {
     const Struct = @TypeOf(data);
     const struct_info = @typeInfo(Struct).@"struct";
-    if (struct_info.backing_integer) |BackingInt| {
+    if (struct_info.backing_integer) |RealBackingInt| {
         switch (encoding) {
-            .as_int => |int_encoding| return encode(
-                @as(BackingInt, @bitCast(data)),
-                writer,
-                allocator,
-                diag,
-                int_encoding,
-            ),
+            .as_int => |int_encoding| {
+                const BackingInt: type = @Type(.{ .int = .{ .bits = int_encoding.bits, .signedness = .unsigned } });
+                const BackingIntEncoding: type = Encoding(BackingInt);
+                comptime var encoding_for_int: BackingIntEncoding = undefined;
+                comptime if (BackingIntEncoding == void) {
+                    encoding_for_int = {};
+                } else {
+                    encoding_for_int = int_encoding.encoding;
+                };
+                return encode(
+                    @as(BackingInt, @intCast(@as(RealBackingInt, @bitCast(data)))),
+                    writer,
+                    allocator,
+                    diag,
+                    encoding_for_int,
+                );
+            },
             .by_fields => |fields_encoding| return encodeStructByFields(
                 data,
                 writer,
@@ -1128,11 +1148,25 @@ fn decodeStruct(
     comptime encoding: Encoding(Data),
 ) !Decoded(Data) {
     const struct_info = @typeInfo(Data).@"struct";
-    if (struct_info.backing_integer) |BackingInt| {
+    if (struct_info.backing_integer) |RealBackingInt| {
         switch (encoding) {
             .as_int => |int_encoding| {
-                const int_repr = try decode(BackingInt, reader, allocator, diag, int_encoding);
-                const as_struct: Data = @bitCast(int_repr.value);
+                const BackingInt: type = @Type(.{ .int = .{ .bits = int_encoding.bits, .signedness = .unsigned } });
+                const BackingIntEncoding: type = Encoding(BackingInt);
+                comptime var encoding_for_int: BackingIntEncoding = undefined;
+                comptime if (BackingIntEncoding == void) {
+                    encoding_for_int = {};
+                } else {
+                    encoding_for_int = int_encoding.encoding;
+                };
+                const int_repr = try decode(
+                    BackingInt,
+                    reader,
+                    allocator,
+                    diag,
+                    encoding_for_int,
+                );
+                const as_struct: Data = @bitCast(@as(RealBackingInt, @intCast(int_repr.value)));
                 return .{
                     .bytes_read = int_repr.bytes_read,
                     .value = as_struct,
@@ -1313,10 +1347,26 @@ fn decodeEnum(
             }
 
             // after looping through all possibilities, there were no matches, so return InvalidEnumTag
+            diag.report(
+                error.InvalidEnumTag,
+                @typeName(Enum),
+                "decoded an invalid enum tag, got the value {d}",
+                .{wire_tag_value},
+            );
             return error.InvalidEnumTag;
         } else if (WireTag == enum_info.tag_type) {
             // there is no custom craft tag function, so use the built-in tag type for this enum (an integer type)
-            break :compute_value try std.meta.intToEnum(Enum, wire_tag_value);
+            break :compute_value std.meta.intToEnum(Enum, wire_tag_value) catch |err| {
+                if (err == error.InvalidEnumTag) {
+                    diag.report(
+                        error.InvalidEnumTag,
+                        @typeName(Enum),
+                        "decoded an invalid enum tag, got the value {d}",
+                        .{wire_tag_value},
+                    );
+                }
+                return err;
+            };
         } else {
             // the WireTag was not the enum tag type, this is a compile error
             // should also be unreachable because of how WireTag is defined
@@ -1364,7 +1414,7 @@ fn decodeUnion(
                 Payload,
                 reader,
                 allocator,
-                try diag.child(.payload),
+                try diag.child(.{ .field = union_field.name }),
                 payload_encoding,
             )).unwrap(&bytes);
             const out: Union = @unionInit(Union, union_field.name, payload);
