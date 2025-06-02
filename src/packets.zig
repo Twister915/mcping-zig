@@ -1703,6 +1703,7 @@ pub const PlayClientboundPacketID = enum(i32) {
     entity_event = 0x1E,
     game_event = 0x22,
     initialize_world_border = 0x25,
+    keep_alive = 0x26,
     chunk_data = 0x27,
     login = 0x2B,
     map_data = 0x2C,
@@ -1715,6 +1716,8 @@ pub const PlayClientboundPacketID = enum(i32) {
     set_center_chunk = 0x57,
     set_render_distance = 0x58,
     set_default_spawn_position = 0x5A,
+    set_experience = 0x60,
+    set_health = 0x61,
     set_held_item = 0x62,
     set_simulation_distance = 0x68,
     update_time = 0x6A,
@@ -1732,6 +1735,7 @@ pub const PlayClientboundPacketID = enum(i32) {
             .entity_event => PlayEntityEventPacket,
             .game_event => PlayGameEventPacket,
             .initialize_world_border => PlayInitializeWorldBorderPacket,
+            .keep_alive => KeepAlivePacket,
             .chunk_data => PlayChunkDataWithLightPacket,
             .login => PlayLoginPacket,
             .map_data => PlayMapDataPacket,
@@ -1744,6 +1748,8 @@ pub const PlayClientboundPacketID = enum(i32) {
             .set_center_chunk => PlaySetCenterChunkPacket,
             .set_render_distance => PlaySetRenderDistancePacket,
             .set_default_spawn_position => PlaySetDefaultSpawnPositionPacket,
+            .set_experience => PlaySetExperiencePacket,
+            .set_health => PlaySetHealthPacket,
             .set_held_item => PlaySetHeldItemPacket,
             .set_simulation_distance => PlaySetSimulationDistancePacket,
             .update_time => PlayUpdateTimePacket,
@@ -2827,4 +2833,25 @@ pub const AdvancementProgress = struct {
             .criterion_id = .{ .max_items = MAX_IDENTIFIER_SIZE },
         };
     },
+};
+
+pub const PlaySetExperiencePacket = struct {
+    experience_bar: f32,
+    level: i32,
+    total_experience: i32,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .level = .varnum,
+        .total_experience = .varnum,
+    };
+};
+
+pub const PlaySetHealthPacket = struct {
+    health: f32,
+    food: i32,
+    food_saturation: f32,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .food = .varnum,
+    };
 };

@@ -1,6 +1,6 @@
 const std = @import("std");
 const Diag = @This();
-const diag_log_scope = .diag;
+pub const diag_log_scope = .diag;
 const diag_log = std.log.scoped(diag_log_scope);
 
 pub const Error = error{

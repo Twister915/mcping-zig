@@ -19,6 +19,9 @@ pub const DIAG_REPORT_OK: bool = true;
 
 pub const std_options: std.Options = .{
     .log_level = if (std.debug.runtime_safety) .debug else .info,
+    .log_scope_levels = &.{
+        .{ .scope = Diag.diag_log_scope, .level = .info },
+    },
 };
 
 pub const gpa_config: std.heap.GeneralPurposeAllocatorConfig = .{
@@ -455,10 +458,18 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
         };
         switch (play_packet_id) {
             inline else => |packet_id| {
-                const packet_data = try play_packet.decodeAs(packet_id.Payload(), &arena_allocator, diag);
+                const PacketT = packet_id.Payload();
+                const packet_data: PacketT = try play_packet.decodeAs(PacketT, &arena_allocator, diag);
                 defer _ = arena_allocator.reset(.{ .retain_with_limit = 16_384 });
 
                 log.info("play packet -> {any}", .{packet_data});
+
+                switch (PacketT) {
+                    packets.KeepAlivePacket => {
+                        _ = try conn.writePacket(0x1A, packet_data, diag);
+                    },
+                    else => {},
+                }
             },
         }
     }
