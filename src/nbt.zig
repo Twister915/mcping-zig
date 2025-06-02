@@ -329,6 +329,8 @@ fn decodeLengthPrefixedBytes(comptime Counter: type, reader: anytype, allocator:
     const counter: usize = @intCast(try reader.readInt(Counter, .big));
     bytes_read += @sizeOf(Counter);
     const buf = try allocator.alloc(u8, counter);
+    errdefer allocator.free(buf);
+
     try reader.readNoEof(buf);
     bytes_read += counter;
     return .{ .value = buf, .bytes_read = bytes_read };
@@ -383,6 +385,7 @@ fn decodeList(reader: anytype, allocator: std.mem.Allocator) !craft_io.Decoded(T
 
         if (tag_type_field.value == @intFromEnum(contents_type_id)) {
             const out: []ElemType = try allocator.alloc(ElemType, list_length);
+            errdefer allocator.free(out);
 
             for (out) |*item| {
                 const item_dcd = try contents_type_id.decodeTag(reader, allocator);
@@ -465,6 +468,8 @@ fn decodeIntArray(comptime Elem: type, reader: anytype, allocator: std.mem.Alloc
     bytes_read += 4;
 
     const buf = try allocator.alloc(Elem, length);
+    errdefer allocator.free(buf);
+
     for (buf) |*elem| {
         elem.* = try reader.readInt(Elem, .big);
         bytes_read += @sizeOf(Elem);
