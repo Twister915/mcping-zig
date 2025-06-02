@@ -2286,6 +2286,8 @@ pub const PlayPlayerInfoUpdatePacket = struct {
                 const action_idx_diag = try actions_diag.child(.{ .index = idx_action });
                 switch (action) {
                     inline else => |payload, tag| {
+                        const field_diag = try action_idx_diag.child(.{ .field = @tagName(tag) });
+                        const payload_diag = try field_diag.child(.payload);
                         const field_name = @tagName(tag);
                         const Payload: type = @FieldType(PlayerAction, field_name);
                         const PayloadEncoding: type = craft_io.Encoding(Payload);
@@ -2294,7 +2296,7 @@ pub const PlayPlayerInfoUpdatePacket = struct {
                             payload,
                             writer,
                             allocator,
-                            action_idx_diag,
+                            payload_diag,
                             payload_encoding,
                         );
                     },
@@ -2349,6 +2351,9 @@ pub const PlayPlayerInfoUpdatePacket = struct {
             const actions_diag = try update_idx_diag.child(.{ .field = "actions" });
             inline for (@typeInfo(PlayerAction).@"union".fields) |action_variant| {
                 if (@field(actions_flag, action_variant.name)) {
+                    const idx_diag = try actions_diag.child(.{ .index = actions_idx });
+                    const field_diag = try idx_diag.child(.{ .field = action_variant.name });
+                    const payload_diag = try field_diag.child(.payload);
                     const ActionPayload: type = action_variant.type;
                     const ActionPayloadEncoding: type = craft_io.Encoding(ActionPayload);
                     const action_encoding: ActionPayloadEncoding = @field(PlayerAction.ENCODING, action_variant.name);
@@ -2356,7 +2361,7 @@ pub const PlayPlayerInfoUpdatePacket = struct {
                         action_variant.type,
                         reader,
                         arena_allocator,
-                        try actions_diag.child(.{ .index = actions_idx }),
+                        payload_diag,
                         action_encoding,
                     )).unwrap(&bytes_read));
                     actions_idx += 1;
