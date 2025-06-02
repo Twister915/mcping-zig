@@ -1759,9 +1759,9 @@ test "encode heap arrays u8" {
 }
 
 pub const Position = packed struct {
-    x: i26,
-    z: i26,
     y: i12,
+    z: i26,
+    x: i26,
 };
 
 pub fn IdOr(comptime Payload: type) type {
