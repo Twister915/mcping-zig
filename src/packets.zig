@@ -585,6 +585,13 @@ pub const TextComponent = struct {
             diag,
             encoding,
         )).unwrap(&bytes_read);
+        diag.ok(
+            @typeName(nbt.Tag),
+            "decode",
+            bytes_read,
+            "decoded NBT for text component {any}",
+            .{nbt_tag},
+        );
         switch (nbt_tag) {
             inline .string, .compound => {
                 return .{
@@ -1292,7 +1299,7 @@ pub const StructuredComponent = union(StructuredComponentType) {
         decorations: []const i32,
 
         pub const ENCODING: craft_io.Encoding(@This()) = .{
-            .decorations = .{ .max_items = 4 },
+            .decorations = .{ .max_items = 4, .items = .varnum },
         };
     },
     container: struct {
@@ -1526,14 +1533,11 @@ pub const SlotData = struct {
             .varnum,
         );
 
-        const components_to_add_diag = try diag.child(.{ .field = "components_to_add" });
-        const components_to_remove_diag = try diag.child(.{ .field = "components_to_remove" });
-
         bytes_written += try craft_io.encode(
             slot.components_to_add.len,
             writer,
             allocator,
-            try components_to_add_diag.child(.length_prefix),
+            try (try diag.child(.{ .field = "components_to_add" })).child(.length_prefix),
             .varnum,
         );
 
@@ -1541,7 +1545,7 @@ pub const SlotData = struct {
             slot.components_to_remove.len,
             writer,
             allocator,
-            try components_to_remove_diag.child(.length_prefix),
+            try (try diag.child(.{ .field = "components_to_remove" })).child(.length_prefix),
             .varnum,
         );
 
@@ -1549,7 +1553,7 @@ pub const SlotData = struct {
             slot.components_to_add,
             writer,
             allocator,
-            components_to_add_diag,
+            try diag.child(.{ .field = "components_to_add" }),
             .{ .length = .disabled, .items = .{} },
         );
 
@@ -1557,7 +1561,7 @@ pub const SlotData = struct {
             slot.components_to_remove,
             writer,
             allocator,
-            components_to_remove_diag,
+            try diag.child(.{ .field = "components_to_remove" }),
             .{ .length = .disabled, .items = .{} },
         );
 
@@ -1580,14 +1584,11 @@ pub const SlotData = struct {
             .varnum,
         )).unwrap(&bytes_read);
 
-        const components_to_add_diag = try diag.child(.{ .field = "components_to_add" });
-        const components_to_remove_diag = try diag.child(.{ .field = "components_to_remove" });
-
         const num_components_to_add = (try craft_io.decode(
             i32,
             reader,
             arena_allocator,
-            try components_to_add_diag.child(.length_prefix),
+            try (try diag.child(.{ .field = "components_to_add" })).child(.length_prefix),
             .varnum,
         )).unwrap(&bytes_read);
 
@@ -1595,7 +1596,7 @@ pub const SlotData = struct {
             i32,
             reader,
             arena_allocator,
-            try components_to_remove_diag.child(.length_prefix),
+            try (try diag.child(.{ .field = "components_to_remove" })).child(.length_prefix),
             .varnum,
         )).unwrap(&bytes_read);
 
@@ -1614,7 +1615,7 @@ pub const SlotData = struct {
                     StructuredComponent,
                     reader,
                     arena_allocator,
-                    try components_to_add_diag.child(.{ .index = idx }),
+                    try (try diag.child(.{ .field = "components_to_add" })).child(.{ .index = idx }),
                     craft_io.defaultEncoding(StructuredComponent),
                 )).unwrap(&bytes_read);
             }
@@ -1632,7 +1633,7 @@ pub const SlotData = struct {
                     StructuredComponentType,
                     reader,
                     arena_allocator,
-                    try components_to_remove_diag.child(.{ .index = idx }),
+                    try (try diag.child(.{ .field = "components_to_remove" })).child(.{ .index = idx }),
                     craft_io.defaultEncoding(StructuredComponentType),
                 )).unwrap(&bytes_read);
             }
@@ -1720,6 +1721,7 @@ pub const PlayClientboundPacketID = enum(i32) {
     system_chat_message = 0x72,
     set_ticking_state = 0x78,
     step_tick = 0x79,
+    update_advancements = 0x7B,
     update_recipes = 0x7E,
 
     pub fn Payload(comptime id: PlayClientboundPacketID) type {
@@ -1748,6 +1750,7 @@ pub const PlayClientboundPacketID = enum(i32) {
             .system_chat_message => PlaySystemChatMessagePacket,
             .set_ticking_state => PlaySetTickingStatePacket,
             .step_tick => PlayStepTickPacket,
+            .update_advancements => PlayUpdateAdvancementsPacket,
             .update_recipes => PlayUpdateRecipesPacket,
         };
     }
@@ -2600,4 +2603,228 @@ pub const PlayChunkDataWithLightPacket = struct {
     pub const ENCODING: craft_io.Encoding(@This()) = .{
         .raw_light_data = .{ .length = .disabled },
     };
+};
+
+pub const PlayUpdateAdvancementsPacket = struct {
+    reset: bool,
+    advancement_mappings: []const struct {
+        key: []const u8,
+        advancement: Advancement,
+    },
+    identifiers: []const []const u8,
+    progress_mappings: []const struct {
+        key: []const u8,
+        progress: AdvancementProgress,
+    },
+    show_advancements: bool,
+};
+
+pub const Advancement = struct {
+    parent_id: ?[]const u8,
+    display: ?AdvancementDisplay,
+    requirements: []const struct {
+        any_of: []const []const u8,
+    },
+    sends_telemetry: bool,
+};
+
+pub const AdvancementDisplay = struct {
+    title: TextComponent,
+    description: TextComponent,
+    icon: Slot,
+    frame_type: FrameType,
+    background_texture: ?[]const u8,
+    show_toast: bool,
+    hidden: bool,
+    x: f32,
+    y: f32,
+
+    pub const FrameType = enum(i32) {
+        task = 0,
+        challenge = 1,
+        goal = 2,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+    };
+
+    const Flags = packed struct {
+        has_background_texture: bool,
+        show_toast: bool,
+        hidden: bool,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .as_int = .{ .bits = 32 },
+        };
+    };
+
+    pub const CraftEncoding: type = void;
+    pub const ENCODING: CraftEncoding = {};
+
+    pub fn craftEncode(
+        adv_display: AdvancementDisplay,
+        writer: anytype,
+        allocator: std.mem.Allocator,
+        diag: Diag,
+        comptime encoding: CraftEncoding,
+    ) !usize {
+        _ = encoding;
+        var bytes_written: usize = 0;
+
+        bytes_written += try craft_io.encode(
+            adv_display.title,
+            writer,
+            allocator,
+            try diag.child(.{ .field = "title" }),
+            comptime craft_io.defaultEncoding(TextComponent),
+        );
+        bytes_written += try craft_io.encode(
+            adv_display.description,
+            writer,
+            allocator,
+            try diag.child(.{ .field = "description" }),
+            comptime craft_io.defaultEncoding(TextComponent),
+        );
+        bytes_written += try craft_io.encode(
+            adv_display.icon,
+            writer,
+            allocator,
+            try diag.child(.{ .field = "icon" }),
+            comptime craft_io.defaultEncoding(Slot),
+        );
+        bytes_written += try craft_io.encode(
+            adv_display.frame_type,
+            writer,
+            allocator,
+            try diag.child(.{ .field = "frame_type" }),
+            comptime craft_io.defaultEncoding(FrameType),
+        );
+
+        bytes_written += try craft_io.encode(
+            Flags{
+                .has_background_texture = adv_display.background_texture != null,
+                .show_toast = adv_display.show_toast,
+                .hidden = adv_display.hidden,
+            },
+            writer,
+            allocator,
+            try diag.child(.{ .field = "flags" }),
+            craft_io.defaultEncoding(Flags),
+        );
+        if (adv_display.background_texture) |background_texture| {
+            bytes_written += try craft_io.encode(
+                background_texture,
+                writer,
+                allocator,
+                try diag.child(.{ .field = "background_texture" }),
+                .{ .max_items = MAX_IDENTIFIER_SIZE },
+            );
+        }
+        bytes_written += try craft_io.encode(
+            adv_display.x,
+            writer,
+            allocator,
+            try diag.child(.{ .field = "x" }),
+            comptime craft_io.defaultEncoding(f32),
+        );
+        bytes_written += try craft_io.encode(
+            adv_display.y,
+            writer,
+            allocator,
+            try diag.child(.{ .field = "y" }),
+            comptime craft_io.defaultEncoding(f32),
+        );
+        return bytes_written;
+    }
+
+    pub fn craftDecode(
+        reader: anytype,
+        arena_allocator: *std.heap.ArenaAllocator,
+        diag: Diag,
+        comptime encoding: CraftEncoding,
+    ) !craft_io.Decoded(AdvancementDisplay) {
+        _ = encoding;
+        var bytes_read: usize = 0;
+
+        var out: AdvancementDisplay = undefined;
+
+        out.title = (try craft_io.decode(
+            TextComponent,
+            reader,
+            arena_allocator,
+            try diag.child(.{ .field = "title" }),
+            comptime craft_io.defaultEncoding(TextComponent),
+        )).unwrap(&bytes_read);
+        out.description = (try craft_io.decode(
+            TextComponent,
+            reader,
+            arena_allocator,
+            try diag.child(.{ .field = "description" }),
+            comptime craft_io.defaultEncoding(TextComponent),
+        )).unwrap(&bytes_read);
+        out.icon = (try craft_io.decode(
+            Slot,
+            reader,
+            arena_allocator,
+            try diag.child(.{ .field = "icon" }),
+            comptime craft_io.defaultEncoding(Slot),
+        )).unwrap(&bytes_read);
+        out.frame_type = (try craft_io.decode(
+            FrameType,
+            reader,
+            arena_allocator,
+            try diag.child(.{ .field = "frame_type" }),
+            comptime craft_io.defaultEncoding(FrameType),
+        )).unwrap(&bytes_read);
+
+        const flags = (try craft_io.decode(
+            Flags,
+            reader,
+            arena_allocator,
+            try diag.child(.{ .field = "flags" }),
+            comptime craft_io.defaultEncoding(Flags),
+        )).unwrap(&bytes_read);
+        if (flags.has_background_texture) {
+            out.background_texture = (try craft_io.decode(
+                []const u8,
+                reader,
+                arena_allocator,
+                try diag.child(.{ .field = "background_texture" }),
+                .{ .max_items = MAX_IDENTIFIER_SIZE },
+            )).unwrap(&bytes_read);
+        } else {
+            out.background_texture = null;
+        }
+        out.show_toast = flags.show_toast;
+        out.hidden = flags.hidden;
+
+        out.x = (try craft_io.decode(
+            f32,
+            reader,
+            arena_allocator,
+            try diag.child(.{ .field = "x" }),
+            comptime craft_io.defaultEncoding(f32),
+        )).unwrap(&bytes_read);
+        out.y = (try craft_io.decode(
+            f32,
+            reader,
+            arena_allocator,
+            try diag.child(.{ .field = "y" }),
+            comptime craft_io.defaultEncoding(f32),
+        )).unwrap(&bytes_read);
+        return .{
+            .value = out,
+            .bytes_read = bytes_read,
+        };
+    }
+};
+
+pub const AdvancementProgress = struct {
+    criteria: []const struct {
+        criterion_id: []const u8,
+        date_of_achieving: ?i64,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .criterion_id = .{ .max_items = MAX_IDENTIFIER_SIZE },
+        };
+    },
 };

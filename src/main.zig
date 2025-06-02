@@ -22,7 +22,7 @@ pub const std_options: std.Options = .{
 };
 
 pub const gpa_config: std.heap.GeneralPurposeAllocatorConfig = .{
-    .verbose_log = std.debug.runtime_safety,
+    .verbose_log = true,
 };
 
 pub fn main() !void {
@@ -443,6 +443,7 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
                 log.info("skipping unimplemented play packet 0x{X:02} ({d} bytes)", .{ @as(u32, @intCast(play_packet.id)), play_packet.bytes_read });
                 continue :play_state;
             } else {
+                @branchHint(.cold);
                 diag.report(
                     error.BadPacketId,
                     "packet",

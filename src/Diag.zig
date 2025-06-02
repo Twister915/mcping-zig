@@ -3,12 +3,16 @@ const Diag = @This();
 const diag_log_scope = .diag;
 const diag_log = std.log.scoped(diag_log_scope);
 
+pub const Error = error{
+    DiagTooDeep,
+};
+
 state: ?*State = null,
 path_next_idx: usize = 0,
 
 pub const MAX_DIAG_DEPTH: usize = 32;
 
-pub fn child(diag: Diag, component: PathComponent) !Diag {
+pub fn child(diag: Diag, component: PathComponent) Error!Diag {
     if (diag.state) |s| {
         const next_idx = diag.path_next_idx + 1;
         if (next_idx >= MAX_DIAG_DEPTH) {

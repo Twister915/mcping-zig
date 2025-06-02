@@ -17,7 +17,7 @@ pub const TagType = enum(u8) {
     int_array = 11,
     long_array = 12,
 
-    fn decodeTag(type_id: TagType, reader: anytype, allocator: std.mem.Allocator) DecodeError(@TypeOf(reader))!craft_io.Decoded(Tag) {
+    fn decodeTag(type_id: TagType, reader: anytype, allocator: std.mem.Allocator, diag: Diag) DecodeError(@TypeOf(reader))!craft_io.Decoded(Tag) {
         switch (type_id) {
             .end => return .{
                 .value = .end,
@@ -49,8 +49,8 @@ pub const TagType = enum(u8) {
             },
             .byte_array => return decodeByteArrayTag(reader, allocator),
             .string => return decodeStringTag(reader, allocator),
-            .list => return decodeListTag(reader, allocator),
-            .compound => return decodeCompoundTag(reader, allocator),
+            .list => return decodeListTag(reader, allocator, diag),
+            .compound => return decodeCompoundTag(reader, allocator, diag),
             .int_array => return decodeIntArrayTag(reader, allocator),
             .long_array => return decodeLongArrayTag(reader, allocator),
         }
@@ -60,7 +60,7 @@ pub const TagType = enum(u8) {
 pub const NbtDecodeError = error{ UnknownNbtType, InvalidTag };
 
 pub fn DecodeError(comptime Reader: type) type {
-    return NbtDecodeError || Reader.NoEofError || std.mem.Allocator.Error;
+    return NbtDecodeError || Reader.NoEofError || std.mem.Allocator.Error || Diag.Error;
 }
 
 pub const Tag = union(TagType) {
@@ -141,8 +141,7 @@ pub const Tag = union(TagType) {
         comptime encoding: void,
     ) !craft_io.Decoded(Tag) {
         _ = encoding;
-        _ = diag; // FIXME diag
-        return try decodeTag(reader, allocator.allocator());
+        return decodeTag(reader, allocator.allocator(), diag);
     }
 
     pub fn craftEncode(
@@ -156,6 +155,69 @@ pub const Tag = union(TagType) {
         _ = encoding;
         _ = diag; // FIXME diag
         return encodeTag(tag, writer);
+    }
+
+    pub fn format(
+        tag: Tag,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+
+        try writer.writeAll("NBT_");
+        try writer.writeAll(@tagName(@as(TagType, tag)));
+        try writer.writeAll(": ");
+        try formatPayload(tag, writer);
+    }
+
+    pub fn formatPayload(tag: Tag, writer: anytype) !void {
+        switch (tag) {
+            .end => {},
+            .string => |str| try std.fmt.format(writer, "{s}", .{str}),
+            inline .byte,
+            .short,
+            .int,
+            .long,
+            .float,
+            .double,
+            => |number| try std.fmt.format(writer, "{d}", .{number}),
+            inline .byte_array,
+            .int_array,
+            .long_array,
+            => |items| try std.fmt.format(writer, "{any}", .{items}),
+            .list => |l| {
+                try writer.writeAll("[");
+                const num_items = l.len();
+                if (num_items > 0) {
+                    const last_idx = num_items - 1;
+                    var idx: usize = 0;
+                    var iter = l.iter();
+                    while (iter.next()) |item| {
+                        try std.fmt.format(writer, "{}", .{item});
+                        if (last_idx != idx) {
+                            try writer.writeAll(", ");
+                        }
+                        idx += 1;
+                    }
+                }
+                try writer.writeAll("]");
+            },
+            .compound => |named_tags| {
+                try writer.writeAll("[");
+                if (named_tags.len > 0) {
+                    const last_idx = named_tags.len - 1;
+                    for (named_tags, 0..) |item, idx| {
+                        try std.fmt.format(writer, "{}", .{item});
+                        if (last_idx != idx) {
+                            try writer.writeAll(", ");
+                        }
+                    }
+                }
+                try writer.writeAll("]");
+            },
+        }
     }
 };
 
@@ -173,9 +235,8 @@ pub const NamedTag = struct {
         diag: Diag,
         comptime encoding: CraftEncoding,
     ) !craft_io.Decoded(NamedTag) {
-        _ = diag; // FIXME diag
         if (encoding.root_has_no_name) {
-            const dcd = try decodeTag(reader, allocator.allocator());
+            const dcd = try decodeTag(reader, allocator.allocator(), diag);
             return .{
                 .value = .{
                     .name = "",
@@ -184,7 +245,7 @@ pub const NamedTag = struct {
                 .bytes_read = dcd.bytes_read,
             };
         } else {
-            return decodeNamedTag(reader, allocator.allocator());
+            return decodeNamedTag(reader, allocator.allocator(), diag);
         }
     }
 
@@ -203,6 +264,22 @@ pub const NamedTag = struct {
             return encodeNamedTag(named_tag, writer);
         }
     }
+
+    pub fn format(
+        named_tag: NamedTag,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+
+        try std.fmt.format(
+            writer,
+            "NBT_{s}(\"{s}\"): {}",
+            .{ @tagName(@as(TagType, named_tag.tag)), named_tag.name, named_tag.tag },
+        );
+    }
 };
 
 fn encodeNamedTag(named_tag: NamedTag, writer: anytype) !usize {
@@ -215,9 +292,9 @@ fn encodeNamedTag(named_tag: NamedTag, writer: anytype) !usize {
     return bytes_written;
 }
 
-fn decodeNamedTag(reader: anytype, allocator: std.mem.Allocator) !craft_io.Decoded(NamedTag) {
+fn decodeNamedTag(reader: anytype, allocator: std.mem.Allocator, diag: Diag) !craft_io.Decoded(NamedTag) {
     var bytes_read: usize = 0;
-    const tag_id = (try decodeTagType(reader)).unwrap(&bytes_read);
+    const tag_id = (try decodeTagType(reader, diag)).unwrap(&bytes_read);
     if (tag_id == .end) {
         return .{
             .value = .{
@@ -229,7 +306,7 @@ fn decodeNamedTag(reader: anytype, allocator: std.mem.Allocator) !craft_io.Decod
     }
 
     const name = (try decodeString(reader, allocator)).unwrap(&bytes_read);
-    const tag = (try tag_id.decodeTag(reader, allocator)).unwrap(&bytes_read);
+    const tag = (try tag_id.decodeTag(reader, allocator, diag)).unwrap(&bytes_read);
     return .{
         .value = .{
             .name = name,
@@ -239,10 +316,10 @@ fn decodeNamedTag(reader: anytype, allocator: std.mem.Allocator) !craft_io.Decod
     };
 }
 
-fn decodeTag(reader: anytype, allocator: std.mem.Allocator) !craft_io.Decoded(Tag) {
+fn decodeTag(reader: anytype, allocator: std.mem.Allocator, diag: Diag) !craft_io.Decoded(Tag) {
     var bytes_read: usize = 0;
-    const tag_type = (try decodeTagType(reader)).unwrap(&bytes_read);
-    const tag = (try tag_type.decodeTag(reader, allocator)).unwrap(&bytes_read);
+    const tag_type = (try decodeTagType(reader, diag)).unwrap(&bytes_read);
+    const tag = (try tag_type.decodeTag(reader, allocator, diag)).unwrap(&bytes_read);
     return .{ .value = tag, .bytes_read = bytes_read };
 }
 
@@ -289,8 +366,15 @@ fn encodeTagPayload(tag: Tag, writer: anytype) !usize {
     }
 }
 
-fn decodeTagType(reader: anytype) !craft_io.Decoded(TagType) {
-    const tag_type: TagType = std.meta.intToEnum(TagType, try reader.readByte()) catch {
+fn decodeTagType(reader: anytype, diag: Diag) !craft_io.Decoded(TagType) {
+    const tag_byte = try reader.readByte();
+    const tag_type: TagType = std.meta.intToEnum(TagType, tag_byte) catch {
+        diag.report(
+            error.UnknownNbtType,
+            @typeName(TagType),
+            "decoded bad tag byte 0x{X:02}",
+            .{tag_byte},
+        );
         return error.UnknownNbtType;
     };
     return .{ .bytes_read = 1, .value = tag_type };
@@ -346,17 +430,17 @@ fn encodeLengthPrefixedBytes(comptime Counter: type, data: []const u8, writer: a
     return bytes_written;
 }
 
-fn decodeListTag(reader: anytype, allocator: std.mem.Allocator) !craft_io.Decoded(Tag) {
-    const list_decoded = try decodeList(reader, allocator);
+fn decodeListTag(reader: anytype, allocator: std.mem.Allocator, diag: Diag) !craft_io.Decoded(Tag) {
+    const list_decoded = try decodeList(reader, allocator, diag);
     return .{
         .value = .{ .list = list_decoded.value },
         .bytes_read = list_decoded.bytes_read,
     };
 }
 
-fn decodeList(reader: anytype, allocator: std.mem.Allocator) !craft_io.Decoded(Tag.List) {
+fn decodeList(reader: anytype, allocator: std.mem.Allocator, diag: Diag) !craft_io.Decoded(Tag.List) {
     var bytes_read: usize = 0;
-    const contents_type_id = (try decodeTagType(reader)).unwrap(&bytes_read);
+    const contents_type_id = (try decodeTagType(reader, try diag.child(.tag))).unwrap(&bytes_read);
     if (contents_type_id == .end) {
         return error.InvalidTag;
     }
@@ -388,8 +472,8 @@ fn decodeList(reader: anytype, allocator: std.mem.Allocator) !craft_io.Decoded(T
             const out: []ElemType = try allocator.alloc(ElemType, list_length);
             errdefer allocator.free(out);
 
-            for (out) |*item| {
-                const item_dcd = try contents_type_id.decodeTag(reader, allocator);
+            for (out, 0..) |*item, idx| {
+                const item_dcd = try contents_type_id.decodeTag(reader, allocator, try diag.child(.{ .index = idx }));
                 bytes_read += item_dcd.bytes_read;
                 item.* = @field(item_dcd.value, tag_field.name);
             }
@@ -415,21 +499,21 @@ fn encodeList(data: Tag.List, writer: anytype) !usize {
     return bytes_written;
 }
 
-fn decodeCompoundTag(reader: anytype, allocator: std.mem.Allocator) !craft_io.Decoded(Tag) {
-    const compound_dcd = try decodeCompound(reader, allocator);
+fn decodeCompoundTag(reader: anytype, allocator: std.mem.Allocator, diag: Diag) !craft_io.Decoded(Tag) {
+    const compound_dcd = try decodeCompound(reader, allocator, diag);
     return .{
         .value = .{ .compound = compound_dcd.value },
         .bytes_read = compound_dcd.bytes_read,
     };
 }
 
-fn decodeCompound(reader: anytype, allocator: std.mem.Allocator) !craft_io.Decoded([]const NamedTag) {
+fn decodeCompound(reader: anytype, allocator: std.mem.Allocator, diag: Diag) !craft_io.Decoded([]const NamedTag) {
     var bytes_read: usize = 0;
     var buf = std.ArrayList(NamedTag).init(allocator);
     defer buf.deinit();
 
     while (true) {
-        const next_tag = (try decodeNamedTag(reader, allocator)).unwrap(&bytes_read);
+        const next_tag = (try decodeNamedTag(reader, allocator, diag)).unwrap(&bytes_read);
         if (next_tag.tag == .end) {
             return .{ .bytes_read = bytes_read, .value = try buf.toOwnedSlice() };
         }

@@ -141,7 +141,7 @@ pub const JsonEncoding = struct {
 
 pub fn Encoding(comptime Payload: type) type {
     comptime {
-        @setEvalBranchQuota(10000);
+        @setEvalBranchQuota(100000);
     }
 
     if (Payload == u8) {
@@ -1169,7 +1169,7 @@ fn decodeStruct(
                     diag,
                     encoding_for_int,
                 );
-                const as_struct: Data = @bitCast(@as(RealBackingInt, @intCast(int_repr.value)));
+                const as_struct: Data = @bitCast(@as(RealBackingInt, @truncate(int_repr.value)));
                 return .{
                     .bytes_read = int_repr.bytes_read,
                     .value = as_struct,
