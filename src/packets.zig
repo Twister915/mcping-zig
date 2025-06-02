@@ -78,7 +78,7 @@ pub const Favicon = struct {
     mime_type: []const u8,
     image: []const u8,
 
-    const Raw = struct {
+    pub const Raw = struct {
         mime_type: []const u8,
         image_base64: []const u8,
 
@@ -619,7 +619,6 @@ pub const TextComponent = struct {
     }
 };
 
-// OK
 pub const BlockPredicate = struct {
     blocks: ?IDSet,
     properties: ?[]const Property,
@@ -628,7 +627,6 @@ pub const BlockPredicate = struct {
     partial_data_components: []const PartialDataComponentMatcher,
 };
 
-// OK
 pub const PartialDataComponentMatcher = struct {
     type: enum(i32) {
         damage = 0,
@@ -1974,7 +1972,7 @@ pub const PlayRecipeBookSettingsPacket = struct {
     blast_furnace_book: BookSettings,
     smoker_recipe_book: BookSettings,
 
-    const BookSettings = struct {
+    pub const BookSettings = struct {
         open: bool,
         filter_active: bool,
     };
