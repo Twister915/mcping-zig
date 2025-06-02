@@ -437,139 +437,21 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
     log.debug("switched to play state", .{});
     while (true) {
         const play_packet = try conn.readPacket(diag);
-        switch (play_packet.id) {
-            0x0A => {
-                const change_difficulty_packet = try play_packet.decodeAs(packets.PlayChangeDifficultyPacket, &arena_allocator, diag);
+        const play_packet_id = std.meta.intToEnum(packets.PlayClientboundPacketID, play_packet.id) catch {
+            diag.report(
+                error.BadPacketId,
+                "packet",
+                "bad packet id in play state: 0x{X:02}",
+                .{@as(u32, @intCast(play_packet.id))},
+            );
+            return error.BadPacketId;
+        };
+        switch (play_packet_id) {
+            inline else => |packet_id| {
+                const packet_data = try play_packet.decodeAs(packet_id.Payload(), &arena_allocator, diag);
                 defer _ = arena_allocator.reset(.retain_capacity);
 
-                log.debug(
-                    "change difficulty to -> {any} (locked? {any})",
-                    .{ change_difficulty_packet.difficulty, change_difficulty_packet.locked },
-                );
-            },
-            0x1E => {
-                const entity_event_packet = try play_packet.decodeAs(packets.PlayEntityEventPacket, &arena_allocator, diag);
-                defer _ = arena_allocator.reset(.retain_capacity);
-
-                log.debug(
-                    "entity {d} has status {d}",
-                    .{ entity_event_packet.entity_id, entity_event_packet.entity_status },
-                );
-            },
-            0x25 => {
-                const init_world_border_packet = try play_packet.decodeAs(packets.PlayInitializeWorldBorderPacket, &arena_allocator, diag);
-                defer _ = arena_allocator.reset(.retain_capacity);
-
-                log.debug("init world border: {any}", .{init_world_border_packet});
-            },
-            0x2C => {
-                const map_data = try play_packet.decodeAs(packets.PlayMapDataPacket, &arena_allocator, diag);
-                defer _ = arena_allocator.reset(.retain_capacity);
-
-                log.debug("map data (play): {any}", .{map_data});
-            },
-            0x2B => {
-                const login_packet = try play_packet.decodeAs(packets.PlayLoginPacket, &arena_allocator, diag);
-                defer _ = arena_allocator.reset(.retain_capacity);
-
-                log.debug("login (play) info: {any}", .{login_packet});
-            },
-            0x39 => {
-                const player_abilities_packet = try play_packet.decodeAs(packets.PlayPlayerAbilitiesPacket, &arena_allocator, diag);
-                defer _ = arena_allocator.reset(.retain_capacity);
-
-                log.debug("player abilities set -> {any}", .{player_abilities_packet});
-            },
-            0x3F => {
-                const player_info_update_packet = try play_packet.decodeAs(packets.PlayPlayerInfoUpdatePacket, &arena_allocator, diag);
-                defer _ = arena_allocator.reset(.retain_capacity);
-
-                for (player_info_update_packet.updates) |update| {
-                    log.debug("player info update -> {any}", .{update});
-                }
-            },
-            0x41 => {
-                const synchronize_player_position_packet = try play_packet.decodeAs(packets.PlaySynchronizePlayerPositionPacket, &arena_allocator, diag);
-                defer _ = arena_allocator.reset(.retain_capacity);
-
-                log.debug("player tp packet -> {any}", .{synchronize_player_position_packet});
-            },
-            0x43 => {
-                const recipe_book_add_packet = try play_packet.decodeAs(packets.PlayRecipeBookAddPacket, &arena_allocator, diag);
-                defer _ = arena_allocator.reset(.retain_capacity);
-
-                for (recipe_book_add_packet.recipies) |recipe| {
-                    log.debug("added recipe -> {any}", .{recipe});
-                }
-            },
-            0x45 => {
-                const recipe_book_settings_packet = try play_packet.decodeAs(packets.PlayRecipeBookSettingsPacket, &arena_allocator, diag);
-                defer _ = arena_allocator.reset(.retain_capacity);
-
-                log.debug("recipe_book_settings --> {any}", .{recipe_book_settings_packet});
-            },
-            0x4F => {
-                const server_data_packet = try play_packet.decodeAs(packets.PlayServerDataPacket, &arena_allocator, diag);
-                defer _ = arena_allocator.reset(.retain_capacity);
-
-                log.debug("server_data --> .motd = {any}, .icon = {d} bytes", .{ server_data_packet.motd, if (server_data_packet.icon) |i| i.len else 0 });
-            },
-            0x57 => {
-                const set_center_chunk_packet = try play_packet.decodeAs(packets.PlaySetCenterChunkPacket, &arena_allocator, diag);
-                defer _ = arena_allocator.reset(.retain_capacity);
-
-                log.debug("center chunk --> {any}", .{set_center_chunk_packet});
-            },
-            0x58 => {
-                const set_render_distance_packet = try play_packet.decodeAs(packets.PlaySetRenderDistancePacket, &arena_allocator, diag);
-                defer _ = arena_allocator.reset(.retain_capacity);
-
-                log.debug("render distance --> {d}", .{set_render_distance_packet.view_distance});
-            },
-            0x5A => {
-                const set_default_spawn_position_packet = try play_packet.decodeAs(packets.PlaySetDefaultSpawnPositionPacket, &arena_allocator, diag);
-                defer _ = arena_allocator.reset(.retain_capacity);
-
-                log.debug("default spawn position --> {any}", .{set_default_spawn_position_packet});
-            },
-            0x62 => {
-                const held_item_packet = try play_packet.decodeAs(packets.PlaySetHeldItemPacket, &arena_allocator, diag);
-                defer _ = arena_allocator.reset(.retain_capacity);
-
-                log.debug("set held item slot to {d}", .{held_item_packet.slot});
-            },
-            0x68 => {
-                const set_simulation_distance_packet = try play_packet.decodeAs(packets.PlaySetSimulationDistancePacket, &arena_allocator, diag);
-                defer _ = arena_allocator.reset(.retain_capacity);
-
-                log.debug("simulation distance --> {d}", .{set_simulation_distance_packet.simulation_distance});
-            },
-            0x6A => {
-                const update_time_packet = try play_packet.decodeAs(packets.PlayUpdateTimePacket, &arena_allocator, diag);
-                defer _ = arena_allocator.reset(.retain_capacity);
-
-                log.debug("update time packet --> {any}", .{update_time_packet});
-            },
-            0x72 => {
-                const system_chat_message_packet = try play_packet.decodeAs(packets.PlaySystemChatMessagePacket, &arena_allocator, diag);
-                defer _ = arena_allocator.reset(.retain_capacity);
-
-                log.debug("system chat message: {any}", .{system_chat_message_packet.message});
-            },
-            0x7E => {
-                const update_recipes_packet = try play_packet.decodeAs(packets.PlayUpdateRecipesPacket, &arena_allocator, diag);
-                defer _ = arena_allocator.reset(.retain_capacity);
-
-                log.debug("got recipes: {any}", .{update_recipes_packet});
-            },
-            else => {
-                diag.report(
-                    error.BadPacketId,
-                    "packet",
-                    "bad packet id in play state: 0x{X:02}",
-                    .{@as(u32, @intCast(play_packet.id))},
-                );
-                return error.BadPacketId;
+                log.info("play packet -> {any}", .{packet_data});
             },
         }
     }

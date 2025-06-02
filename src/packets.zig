@@ -26,21 +26,6 @@ pub const HandshakingPacket = struct {
     };
 };
 
-test "encode handshaking packet" {
-    const pkt: HandshakingPacket = .{
-        .version = 770,
-        .address = "rpi4.jhome",
-        .port = 25565,
-        .next_state = .status,
-    };
-
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-
-    _ = try craft_io.encode(pkt, buf.writer(), std.testing.allocator, .{}, HandshakingPacket.ENCODING);
-    std.debug.print("\nin: {any}\nencoding: {any}\nout:{any}\n", .{ pkt, HandshakingPacket.ENCODING, buf.items });
-}
-
 // state = status
 pub const StatusResponsePacket = struct {
     status: Status,
@@ -1707,6 +1692,52 @@ pub const SlotDisplay = union(SlotDisplayType) {
     pub const CraftEncoding = struct {
         tag: craft_io.Encoding(SlotDisplayType) = craft_io.defaultEncoding(SlotDisplayType),
     };
+};
+
+pub const PlayClientboundPacketID = enum(i32) {
+    change_difficulty = 0x0A,
+    entity_event = 0x1E,
+    initialize_world_border = 0x25,
+    login = 0x2B,
+    map_data = 0x2C,
+    player_abilities = 0x39,
+    player_info_update = 0x3F,
+    synchronize_player_position = 0x41,
+    recipe_book_add = 0x43,
+    recipe_book_settings = 0x45,
+    server_data = 0x4F,
+    set_center_chunk = 0x57,
+    set_render_distance = 0x58,
+    set_default_spawn_position = 0x5A,
+    set_held_item = 0x62,
+    set_simulation_distance = 0x68,
+    update_time = 0x6A,
+    system_chat_message = 0x72,
+    update_recipes = 0x7E,
+
+    pub fn Payload(comptime id: PlayClientboundPacketID) type {
+        return switch (id) {
+            .change_difficulty => PlayChangeDifficultyPacket,
+            .entity_event => PlayEntityEventPacket,
+            .initialize_world_border => PlayInitializeWorldBorderPacket,
+            .login => PlayLoginPacket,
+            .map_data => PlayMapDataPacket,
+            .player_abilities => PlayPlayerAbilitiesPacket,
+            .player_info_update => PlayPlayerInfoUpdatePacket,
+            .synchronize_player_position => PlaySynchronizePlayerPositionPacket,
+            .recipe_book_add => PlayRecipeBookAddPacket,
+            .recipe_book_settings => PlayRecipeBookSettingsPacket,
+            .server_data => PlayServerDataPacket,
+            .set_center_chunk => PlaySetCenterChunkPacket,
+            .set_render_distance => PlaySetRenderDistancePacket,
+            .set_default_spawn_position => PlaySetDefaultSpawnPositionPacket,
+            .set_held_item => PlaySetHeldItemPacket,
+            .set_simulation_distance => PlaySetSimulationDistancePacket,
+            .update_time => PlayUpdateTimePacket,
+            .system_chat_message => PlaySystemChatMessagePacket,
+            .update_recipes => PlayUpdateRecipesPacket,
+        };
+    }
 };
 
 pub const PlayLoginPacket = struct {
