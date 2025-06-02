@@ -22,7 +22,7 @@ pub const std_options: std.Options = .{
 };
 
 pub const gpa_config: std.heap.GeneralPurposeAllocatorConfig = .{
-    .verbose_log = true,
+    .verbose_log = std.debug.runtime_safety,
 };
 
 pub fn main() !void {
