@@ -5,6 +5,7 @@ const UUID = @import("UUID.zig");
 const craft_chat = @import("chat.zig");
 const draw = @import("draw.zig");
 const craft_io = @import("io.zig");
+const Diag = @import("Diag.zig");
 
 const log = std.log.scoped(.main);
 
@@ -59,7 +60,7 @@ fn handleTarget(allocator: std.mem.Allocator, arg: []const u8) void {
     var diag_arena_alloc = std.heap.ArenaAllocator.init(allocator);
     defer diag_arena_alloc.deinit();
 
-    var diag_state = craft_io.Diag.State.init(DIAG_REPORT_OK, &diag_arena_alloc);
+    var diag_state = Diag.State.init(DIAG_REPORT_OK, &diag_arena_alloc);
 
     pingPrint(allocator, target, diag_state.diag()) catch |err| {
         dumpDiagReports(&diag_state);
@@ -91,7 +92,7 @@ fn targetFromArg(raw: []const u8) !Target {
     return target;
 }
 
-fn pingPrint(parent_allocator: std.mem.Allocator, target: Target, diag: craft_io.Diag) !void {
+fn pingPrint(parent_allocator: std.mem.Allocator, target: Target, diag: Diag) !void {
     var arena_allocator = std.heap.ArenaAllocator.init(parent_allocator);
     defer arena_allocator.deinit();
 
@@ -136,7 +137,7 @@ const PingResponse = struct {
     latency_ms: ?i64 = null,
 };
 
-fn ping(target: Target, arena_allocator: *std.heap.ArenaAllocator, diag: craft_io.Diag) !PingResponse {
+fn ping(target: Target, arena_allocator: *std.heap.ArenaAllocator, diag: Diag) !PingResponse {
     var conn = try CraftConn.connect(arena_allocator.allocator(), target.host, target.port);
     defer conn.deinit(); // <-- close connection at the end of this function
 
@@ -177,7 +178,7 @@ const Profile = struct {
     uuid: UUID,
 };
 
-fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, diag: craft_io.Diag) !void {
+fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, diag: Diag) !void {
     var conn = try CraftConn.connect(allocator, target.host, target.port);
     defer conn.deinit();
 
@@ -435,21 +436,26 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
     }
 
     log.debug("switched to play state", .{});
-    while (true) {
+    play_state: while (true) {
         const play_packet = try conn.readPacket(diag);
         const play_packet_id = std.meta.intToEnum(packets.PlayClientboundPacketID, play_packet.id) catch {
-            diag.report(
-                error.BadPacketId,
-                "packet",
-                "bad packet id in play state: 0x{X:02}",
-                .{@as(u32, @intCast(play_packet.id))},
-            );
-            return error.BadPacketId;
+            if (packets.PlayClientboundPacketID.isValidPacketId(play_packet.id)) {
+                log.info("skipping unimplemented play packet 0x{X:02} ({d} bytes)", .{ @as(u32, @intCast(play_packet.id)), play_packet.bytes_read });
+                continue :play_state;
+            } else {
+                diag.report(
+                    error.BadPacketId,
+                    "packet",
+                    "bad packet id in play state: 0x{X:02}",
+                    .{@as(u32, @intCast(play_packet.id))},
+                );
+                return error.BadPacketId;
+            }
         };
         switch (play_packet_id) {
             inline else => |packet_id| {
                 const packet_data = try play_packet.decodeAs(packet_id.Payload(), &arena_allocator, diag);
-                defer _ = arena_allocator.reset(.retain_capacity);
+                defer _ = arena_allocator.reset(.{ .retain_with_limit = 16_384 });
 
                 log.info("play packet -> {any}", .{packet_data});
             },
@@ -459,7 +465,7 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
     unreachable;
 }
 
-fn dumpDiagReports(diag_state: *const craft_io.Diag.State) void {
+fn dumpDiagReports(diag_state: *const Diag.State) void {
     for (diag_state.reports.items) |diag_report| {
         log.warn("diag report: {}", .{diag_report});
     }

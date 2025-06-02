@@ -1,5 +1,6 @@
 const std = @import("std");
 const craft_io = @import("io.zig");
+const Diag = @import("Diag.zig");
 
 pub const TagType = enum(u8) {
     end = 0,
@@ -136,7 +137,7 @@ pub const Tag = union(TagType) {
     pub fn craftDecode(
         reader: anytype,
         allocator: *std.heap.ArenaAllocator,
-        diag: craft_io.Diag,
+        diag: Diag,
         comptime encoding: void,
     ) !craft_io.Decoded(Tag) {
         _ = encoding;
@@ -148,7 +149,7 @@ pub const Tag = union(TagType) {
         tag: Tag,
         writer: anytype,
         allocator: std.mem.Allocator,
-        diag: craft_io.Diag,
+        diag: Diag,
         comptime encoding: void,
     ) !usize {
         _ = allocator;
@@ -169,7 +170,7 @@ pub const NamedTag = struct {
     pub fn craftDecode(
         reader: anytype,
         allocator: *std.heap.ArenaAllocator,
-        diag: craft_io.Diag,
+        diag: Diag,
         comptime encoding: CraftEncoding,
     ) !craft_io.Decoded(NamedTag) {
         _ = diag; // FIXME diag
@@ -191,7 +192,7 @@ pub const NamedTag = struct {
         named_tag: NamedTag,
         writer: anytype,
         allocator: std.mem.Allocator,
-        diag: craft_io.Diag,
+        diag: Diag,
         comptime encoding: CraftEncoding,
     ) !usize {
         _ = allocator;

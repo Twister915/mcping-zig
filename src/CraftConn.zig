@@ -1,6 +1,7 @@
 const std = @import("std");
 const net = std.net;
 const craft_io = @import("io.zig");
+const Diag = @import("Diag.zig");
 const cfb8 = @import("cfb8.zig");
 
 const BUF_SIZE = 4096;
@@ -58,7 +59,7 @@ pub const ReadPkt = struct {
     const Self = @This();
 
     // if you call this, we decode the packet into owned memory (call deinit() on the returned T)
-    pub fn decodeAs(self: Self, comptime T: type, arena_allocator: *std.heap.ArenaAllocator, diag: craft_io.Diag) !T {
+    pub fn decodeAs(self: Self, comptime T: type, arena_allocator: *std.heap.ArenaAllocator, diag: Diag) !T {
         const encoding = comptime defaultPacketEncoding(T);
         var stream = std.io.fixedBufferStream(self.payload);
         var counting_stream = std.io.countingReader(stream.reader());
@@ -86,7 +87,7 @@ pub const ReadPkt = struct {
         return decoded.value;
     }
 
-    pub fn decodeWithoutArena(self: Self, comptime T: type, allocator: std.mem.Allocator, diag: craft_io.Diag) !OwnedPacket(T) {
+    pub fn decodeWithoutArena(self: Self, comptime T: type, allocator: std.mem.Allocator, diag: Diag) !OwnedPacket(T) {
         const arena_allocator = try allocator.create(std.heap.ArenaAllocator);
         arena_allocator.* = .init(allocator);
 
@@ -106,7 +107,7 @@ pub fn OwnedPacket(comptime Payload: type) type {
     };
 }
 
-pub fn readAndExpectPacket(conn: *Conn, expected_id: i32, comptime Packet: type, arena_allocator: *std.heap.ArenaAllocator, diag: craft_io.Diag) !Packet {
+pub fn readAndExpectPacket(conn: *Conn, expected_id: i32, comptime Packet: type, arena_allocator: *std.heap.ArenaAllocator, diag: Diag) !Packet {
     const next_packet = try conn.readPacket(diag);
     if (next_packet.id != expected_id) {
         return error.UnexpectedPacket;
@@ -115,7 +116,7 @@ pub fn readAndExpectPacket(conn: *Conn, expected_id: i32, comptime Packet: type,
     return try next_packet.decodeAs(Packet, arena_allocator, diag);
 }
 
-pub fn readPacket(conn: *Conn, diag: craft_io.Diag) !ReadPkt {
+pub fn readPacket(conn: *Conn, diag: Diag) !ReadPkt {
     const conn_reader = conn.reader.reader();
     if (conn.encryption) |*encryption| {
         return conn.readPacketFrom(encryption.rx.reader(conn_reader), diag);
@@ -124,7 +125,7 @@ pub fn readPacket(conn: *Conn, diag: craft_io.Diag) !ReadPkt {
     }
 }
 
-fn readPacketFrom(conn: *Conn, reader: anytype, diag: craft_io.Diag) !ReadPkt {
+fn readPacketFrom(conn: *Conn, reader: anytype, diag: Diag) !ReadPkt {
     conn.clearBuffers();
 
     // decode the packet length, which is always uncompressed
@@ -208,7 +209,7 @@ fn readPacketFrom(conn: *Conn, reader: anytype, diag: craft_io.Diag) !ReadPkt {
     return pkt;
 }
 
-fn readPacketWithLengthFrom(conn: *Conn, reader: anytype, diag: craft_io.Diag, size: usize, bytes_already_read: usize) !ReadPkt {
+fn readPacketWithLengthFrom(conn: *Conn, reader: anytype, diag: Diag, size: usize, bytes_already_read: usize) !ReadPkt {
     var bytes_decoded = bytes_already_read;
     const id_and_payload = try conn.buf.addManyAsSlice(size);
     try reader.readNoEof(id_and_payload);
@@ -238,7 +239,7 @@ fn readPacketWithLengthFrom(conn: *Conn, reader: anytype, diag: craft_io.Diag, s
     return .{ .id = id, .payload = payload, .bytes_read = size };
 }
 
-pub fn writePacket(conn: *Conn, id: i32, packet: anytype, diag: craft_io.Diag) !usize {
+pub fn writePacket(conn: *Conn, id: i32, packet: anytype, diag: Diag) !usize {
     return conn.writePacketWithEncoding(
         id,
         packet,
@@ -251,7 +252,7 @@ pub fn writePacketWithEncoding(
     conn: *Conn,
     id: i32,
     packet: anytype,
-    diag: craft_io.Diag,
+    diag: Diag,
     comptime encoding: craft_io.Encoding(@TypeOf(packet)),
 ) !usize {
     conn.clearBuffers();

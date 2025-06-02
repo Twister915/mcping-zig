@@ -1,5 +1,6 @@
 const std = @import("std");
 const craft_io = @import("io.zig");
+const Diag = @import("Diag.zig");
 const chat = @import("chat.zig");
 const UUID = @import("UUID.zig");
 const util = @import("util.zig");
@@ -449,7 +450,7 @@ pub const IDSet = union(enum) {
         id_set: IDSet,
         writer: anytype,
         allocator: std.mem.Allocator,
-        diag: craft_io.Diag,
+        diag: Diag,
         comptime encoding: void,
     ) !usize {
         _ = encoding;
@@ -494,7 +495,7 @@ pub const IDSet = union(enum) {
     pub fn craftDecode(
         reader: anytype,
         arena_allocator: *std.heap.ArenaAllocator,
-        diag: craft_io.Diag,
+        diag: Diag,
         comptime encoding: CraftEncoding,
     ) !craft_io.Decoded(IDSet) {
         _ = encoding;
@@ -551,7 +552,7 @@ pub const TextComponent = struct {
         cmp: TextComponent,
         writer: anytype,
         allocator: std.mem.Allocator,
-        diag: craft_io.Diag,
+        diag: Diag,
         comptime encoding: CraftEncoding,
     ) !usize {
         switch (cmp.nbt_data) {
@@ -573,7 +574,7 @@ pub const TextComponent = struct {
     pub fn craftDecode(
         reader: anytype,
         arena_allocator: *std.heap.ArenaAllocator,
-        diag: craft_io.Diag,
+        diag: Diag,
         comptime encoding: CraftEncoding,
     ) !craft_io.Decoded(TextComponent) {
         var bytes_read: usize = 0;
@@ -1433,7 +1434,7 @@ pub const Slot = struct {
         slot: Slot,
         writer: anytype,
         allocator: std.mem.Allocator,
-        diag: craft_io.Diag,
+        diag: Diag,
         comptime encoding: CraftEncoding,
     ) !usize {
         _ = encoding;
@@ -1470,7 +1471,7 @@ pub const Slot = struct {
     pub fn craftDecode(
         reader: anytype,
         arena_allocator: *std.heap.ArenaAllocator,
-        diag: craft_io.Diag,
+        diag: Diag,
         comptime encoding: CraftEncoding,
     ) !craft_io.Decoded(Slot) {
         _ = encoding;
@@ -1512,7 +1513,7 @@ pub const SlotData = struct {
         slot: SlotData,
         writer: anytype,
         allocator: std.mem.Allocator,
-        diag: craft_io.Diag,
+        diag: Diag,
         comptime encoding: CraftEncoding,
     ) !usize {
         _ = encoding;
@@ -1566,7 +1567,7 @@ pub const SlotData = struct {
     pub fn craftDecode(
         reader: anytype,
         arena_allocator: *std.heap.ArenaAllocator,
-        diag: craft_io.Diag,
+        diag: Diag,
         comptime encoding: CraftEncoding,
     ) !craft_io.Decoded(SlotData) {
         _ = encoding;
@@ -1696,8 +1697,12 @@ pub const SlotDisplay = union(SlotDisplayType) {
 
 pub const PlayClientboundPacketID = enum(i32) {
     change_difficulty = 0x0A,
+    set_container_content = 0x12,
+    set_container_slot = 0x14,
     entity_event = 0x1E,
+    game_event = 0x22,
     initialize_world_border = 0x25,
+    chunk_data = 0x27,
     login = 0x2B,
     map_data = 0x2C,
     player_abilities = 0x39,
@@ -1713,13 +1718,19 @@ pub const PlayClientboundPacketID = enum(i32) {
     set_simulation_distance = 0x68,
     update_time = 0x6A,
     system_chat_message = 0x72,
+    set_ticking_state = 0x78,
+    step_tick = 0x79,
     update_recipes = 0x7E,
 
     pub fn Payload(comptime id: PlayClientboundPacketID) type {
         return switch (id) {
             .change_difficulty => PlayChangeDifficultyPacket,
+            .set_container_content => PlaySetContainerContentPacket,
+            .set_container_slot => PlaySetContainerSlotPacket,
             .entity_event => PlayEntityEventPacket,
+            .game_event => PlayGameEventPacket,
             .initialize_world_border => PlayInitializeWorldBorderPacket,
+            .chunk_data => PlayChunkDataWithLightPacket,
             .login => PlayLoginPacket,
             .map_data => PlayMapDataPacket,
             .player_abilities => PlayPlayerAbilitiesPacket,
@@ -1735,8 +1746,14 @@ pub const PlayClientboundPacketID = enum(i32) {
             .set_simulation_distance => PlaySetSimulationDistancePacket,
             .update_time => PlayUpdateTimePacket,
             .system_chat_message => PlaySystemChatMessagePacket,
+            .set_ticking_state => PlaySetTickingStatePacket,
+            .step_tick => PlayStepTickPacket,
             .update_recipes => PlayUpdateRecipesPacket,
         };
+    }
+
+    pub fn isValidPacketId(id: i32) bool {
+        return id <= 0x82 and id >= 0x00;
     }
 };
 
@@ -1879,7 +1896,7 @@ pub const PlayMapDataPacket = struct {
             patches: ColorPatch,
             writer: anytype,
             allocator: std.mem.Allocator,
-            diag: craft_io.Diag,
+            diag: Diag,
             comptime encoding: CraftEncoding,
         ) !usize {
             _ = encoding;
@@ -1894,7 +1911,7 @@ pub const PlayMapDataPacket = struct {
         pub fn craftDecode(
             reader: anytype,
             allocator: *std.heap.ArenaAllocator,
-            diag: craft_io.Diag,
+            diag: Diag,
             comptime encoding: CraftEncoding,
         ) !craft_io.Decoded(ColorPatch) {
             _ = encoding;
@@ -2219,7 +2236,7 @@ pub const PlayPlayerInfoUpdatePacket = struct {
         id: UUID,
         player_actions: []const PlayerAction,
 
-        pub fn actionsFlag(self: PlayerInfoItem, diag: craft_io.Diag) !PlayerActionsFlag {
+        pub fn actionsFlag(self: PlayerInfoItem, diag: Diag) !PlayerActionsFlag {
             var flag: PlayerActionsFlag = @bitCast(0);
             const Counters = std.EnumArray(PlayerActionType, u8);
             var counters: Counters = .initFill(0);
@@ -2278,7 +2295,7 @@ pub const PlayPlayerInfoUpdatePacket = struct {
         pkt: PlayPlayerInfoUpdatePacket,
         writer: anytype,
         allocator: std.mem.Allocator,
-        diag: craft_io.Diag,
+        diag: Diag,
         comptime encoding: CraftEncoding,
     ) !usize {
         _ = encoding;
@@ -2340,7 +2357,7 @@ pub const PlayPlayerInfoUpdatePacket = struct {
     pub fn craftDecode(
         reader: anytype,
         arena_allocator: *std.heap.ArenaAllocator,
-        diag: craft_io.Diag,
+        diag: Diag,
         comptime encoding: CraftEncoding,
     ) !craft_io.Decoded(PlayPlayerInfoUpdatePacket) {
         _ = encoding;
@@ -2407,7 +2424,7 @@ pub const PlayPlayerInfoUpdatePacket = struct {
         };
     }
 
-    pub fn actionsFlag(self: PlayPlayerInfoUpdatePacket, diag: craft_io.Diag) !PlayerActionsFlag {
+    pub fn actionsFlag(self: PlayPlayerInfoUpdatePacket, diag: Diag) !PlayerActionsFlag {
         var flag: PlayerActionsFlag = undefined;
         var has_any_flag: bool = false;
         var any_error: bool = false;
@@ -2488,4 +2505,99 @@ pub const PlayUpdateTimePacket = struct {
 pub const PlaySetDefaultSpawnPositionPacket = struct {
     location: craft_io.Position,
     angle: f32,
+};
+
+pub const PlayGameEventPacket = struct {
+    event: enum(u8) {
+        no_respawn_block_available = 0,
+        begin_raining = 1,
+        end_raining = 2,
+        change_gamemode = 3,
+        win_game = 4,
+        demo_event = 5,
+        arrow_hit_player = 6,
+        rain_level_change = 7,
+        thunder_level_change = 8,
+        play_pufferfish_sting_sound = 9,
+        play_elder_guardian_mob_appearance = 10,
+        enable_respawn_screen = 11,
+        limited_crafting = 12,
+        start_waiting_for_level_chunks = 13,
+    },
+    value: f32,
+};
+
+pub const PlaySetTickingStatePacket = struct {
+    tick_rate: f32,
+    is_frozen: bool,
+};
+
+pub const PlayStepTickPacket = struct {
+    tick_steps: i32,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .tick_steps = .varnum,
+    };
+};
+
+pub const PlaySetContainerContentPacket = struct {
+    window_id: i32,
+    state_id: i32,
+    slot_data: []const Slot,
+    carried_item: Slot,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .window_id = .varnum,
+        .state_id = .varnum,
+    };
+};
+
+pub const PlaySetContainerSlotPacket = struct {
+    window_id: i32,
+    state_id: i32,
+    slot: i16,
+    slot_data: Slot,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .window_id = .varnum,
+        .state_id = .varnum,
+    };
+};
+
+pub const Heightmap = struct {
+    hm_type: i32,
+    data: []const i64,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .hm_type = .varnum,
+    };
+};
+
+pub const ChunkData = struct {
+    heightmaps: []const Heightmap,
+    raw_chunk_data: []const u8,
+    block_entities: []const struct {
+        xz_coordinate: packed struct {
+            z: u4,
+            x: u4,
+        },
+        y: i16,
+        type_code: i32,
+        data: nbt.NamedTag,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .type_code = .varnum,
+        };
+    },
+};
+
+pub const PlayChunkDataWithLightPacket = struct {
+    x: i32,
+    z: i32,
+    chunk: ChunkData,
+    raw_light_data: []const u8,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .raw_light_data = .{ .length = .disabled },
+    };
 };
