@@ -89,8 +89,10 @@ pub fn decode(
     }
 
     if (Data == u8) {
+        const b: u8 = try reader.readByte();
+        diag.ok(@typeName(u8), "decode", 1, "decoded byte {d}", .{b});
         return .{
-            .value = try reader.readByte(),
+            .value = b,
             .bytes_read = 1,
         };
     }
@@ -326,7 +328,7 @@ fn UnionEncoding(comptime U: type) type {
     };
 }
 
-fn UnionFieldsEncoding(comptime U: type) type {
+pub fn UnionFieldsEncoding(comptime U: type) type {
     const union_info = @typeInfo(U).@"union";
     var encoding_fields: [union_info.fields.len]std.builtin.Type.StructField = undefined;
     for (union_info.fields, &encoding_fields) |union_field, *encoding_field| {
@@ -1250,6 +1252,7 @@ fn decodeArray(
     if (Payload == u8) {
         try reader.readNoEof(&out);
         bytes += array_info.len;
+        diag.ok(@typeName(Data), "decodeArray", array_info.len, "decoded bytes: {any}", .{out});
     } else {
         const items_encoding = encoding.items;
         inline for (&out, 0..) |*elem, idx| {

@@ -2116,3 +2116,342 @@ pub const PlayUseItemPacket = struct {
         .sequence = .varnum,
     };
 };
+
+pub const PlayPlayerInfoUpdatePacket = struct {
+    pub const PlayerActionType = enum {
+        add_player,
+        initalize_chat,
+        update_gamemode,
+        update_listed,
+        update_latency,
+        update_display_name,
+        update_list_priority,
+        update_hat,
+    };
+
+    pub const PlayerActionsFlag = packed struct {
+        add_player: bool,
+        initalize_chat: bool,
+        update_gamemode: bool,
+        update_listed: bool,
+        update_latency: bool,
+        update_display_name: bool,
+        update_list_priority: bool,
+        update_hat: bool,
+
+        pub fn numActive(self: PlayerActionsFlag) usize {
+            var num_active: usize = 0;
+            inline for (@typeInfo(@This()).@"struct".fields) |field| {
+                if (@field(self, field.name)) {
+                    num_active += 1;
+                }
+            }
+            return num_active;
+        }
+    };
+
+    pub const PlayerAction = union(PlayerActionType) {
+        add_player: struct {
+            name: []const u8,
+            properties: []const ProfileProperty,
+        },
+        initalize_chat: ?struct {
+            chat_session_id: UUID,
+            public_key_expiry_time: i64,
+            encoded_public_key: []const u8,
+            public_key_signature: []const u8,
+
+            pub const ENCODING: craft_io.Encoding(@This()) = .{
+                .encoded_public_key = .{ .max_items = 512 },
+                .public_key_signature = .{ .max_items = 4096 },
+            };
+        },
+        update_gamemode: enum(i32) {
+            survival = 0,
+            creative = 1,
+            adventure = 2,
+            spectator = 3,
+        },
+        update_listed: bool,
+        update_latency: i32,
+        update_display_name: ?TextComponent,
+        update_list_priority: i32,
+        update_hat: bool,
+
+        pub const CraftEncoding: type = craft_io.UnionFieldsEncoding(@This());
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .update_gamemode = .varnum,
+            .update_latency = .varnum,
+            .update_list_priority = .varnum,
+        };
+    };
+
+    pub const PlayerInfoItem = struct {
+        id: UUID,
+        player_actions: []const PlayerAction,
+
+        pub fn actionsFlag(self: PlayerInfoItem, diag: craft_io.Diag) !PlayerActionsFlag {
+            var flag: PlayerActionsFlag = @bitCast(0);
+            const Counters = std.EnumArray(PlayerActionType, u8);
+            var counters: Counters = .initFill(0);
+            var any_dupes: bool = false;
+            var action_idx: usize = 0;
+            inline for (@typeInfo(PlayerActionType).@"enum".fields) |action_type_field| {
+                const next_allowed_action = @as(PlayerActionType, @enumFromInt(action_type_field.value));
+                if (self.player_actions.len > action_idx) {
+                    if (self.player_actions[action_idx] == next_allowed_action) {
+                        const counter = counters.getPtr(next_allowed_action);
+                        counter.* += 1;
+                        @field(flag, action_type_field.name) = true;
+                        if (counter.* > 1) {
+                            any_dupes = true;
+                        }
+                        action_idx += 1;
+                    }
+                }
+            }
+            if (any_dupes) {
+                var counter_iter = counters.iterator();
+                while (counter_iter.next()) |entry| {
+                    const count = entry.value.*;
+                    if (count > 1) {
+                        diag.report(
+                            error.DuplicatesPlayerInfoActionType,
+                            @typeName(@This()),
+                            "found {d} instances of the {s} action",
+                            .{ count, @tagName(entry.key) },
+                        );
+                    }
+                }
+                return error.DuplicatesPlayerInfoActionType;
+            }
+
+            if (action_idx < self.player_actions.len) {
+                diag.report(
+                    error.OutOfOrderPlayerInfoActionType,
+                    @typeName(@This()),
+                    "player info actions were specified out of order: {any}",
+                    .{self.player_actions},
+                );
+                return error.OutOfOrderPlayerInfoActionType;
+            }
+
+            return flag;
+        }
+    };
+
+    updates: []const PlayerInfoItem,
+
+    pub const CraftEncoding: type = void;
+    pub const ENCODING: CraftEncoding = {};
+
+    pub fn craftEncode(
+        pkt: PlayPlayerInfoUpdatePacket,
+        writer: anytype,
+        allocator: std.mem.Allocator,
+        diag: craft_io.Diag,
+        comptime encoding: CraftEncoding,
+    ) !usize {
+        _ = encoding;
+        const flag_diag = try diag.child(.{ .field = "flag" });
+        const actions_flag = try pkt.actionsFlag(flag_diag);
+        var bytes_written: usize = 0;
+        bytes_written += try craft_io.encode(
+            actions_flag,
+            writer,
+            allocator,
+            flag_diag,
+            comptime craft_io.defaultEncoding(PlayerActionsFlag),
+        );
+
+        const updates_diag = try diag.child(.{ .field = "updates" });
+
+        bytes_written += try craft_io.encode(
+            @as(i32, @intCast(pkt.updates.len)),
+            writer,
+            allocator,
+            try updates_diag.child(.length_prefix),
+            .varnum,
+        );
+
+        for (pkt.updates, 0..) |item, idx_update| {
+            const idx_diag = try updates_diag.child(.{ .index = idx_update });
+            bytes_written += try craft_io.encode(
+                item.id,
+                writer,
+                allocator,
+                try idx_diag.child(.{ .field = "id" }),
+                .{},
+            );
+            const actions_diag = try idx_diag.child(.{ .field = "actions" });
+            for (item.player_actions, 0..) |action, idx_action| {
+                const action_idx_diag = try actions_diag.child(.{ .index = idx_action });
+                switch (action) {
+                    inline else => |payload, tag| {
+                        const field_name = @tagName(tag);
+                        const Payload: type = @FieldType(PlayerAction, field_name);
+                        const PayloadEncoding: type = craft_io.Encoding(Payload);
+                        const payload_encoding: PayloadEncoding = @field(PlayerAction.ENCODING, field_name);
+                        bytes_written += try craft_io.encode(
+                            payload,
+                            writer,
+                            allocator,
+                            action_idx_diag,
+                            payload_encoding,
+                        );
+                    },
+                }
+            }
+        }
+        return bytes_written;
+    }
+
+    pub fn craftDecode(
+        reader: anytype,
+        arena_allocator: *std.heap.ArenaAllocator,
+        diag: craft_io.Diag,
+        comptime encoding: CraftEncoding,
+    ) !craft_io.Decoded(PlayPlayerInfoUpdatePacket) {
+        _ = encoding;
+        var bytes_read: usize = 0;
+        const actions_flag: PlayerActionsFlag = (try craft_io.decode(
+            PlayerActionsFlag,
+            reader,
+            arena_allocator,
+            try diag.child(.{ .field = "flag" }),
+            comptime craft_io.defaultEncoding(PlayerActionsFlag),
+        )).unwrap(&bytes_read);
+
+        const updates_diag = try diag.child(.{ .field = "updates" });
+        const num_updates: usize = @intCast((try craft_io.decode(
+            i32,
+            reader,
+            arena_allocator,
+            try updates_diag.child(.length_prefix),
+            .varnum,
+        )).unwrap(&bytes_read));
+        const allocator = arena_allocator.allocator();
+        const updates: []PlayerInfoItem = try allocator.alloc(PlayerInfoItem, num_updates);
+        errdefer allocator.free(updates);
+
+        for (0..num_updates) |update_idx| {
+            const update_idx_diag = try updates_diag.child(.{ .index = update_idx });
+            const update = &updates[update_idx];
+            update.*.id = (try craft_io.decode(
+                UUID,
+                reader,
+                arena_allocator,
+                try update_idx_diag.child(.{ .field = "id" }),
+                .{},
+            )).unwrap(&bytes_read);
+
+            const actions: []PlayerAction = try allocator.alloc(PlayerAction, actions_flag.numActive());
+            errdefer allocator.free(actions);
+            var actions_idx: usize = 0;
+            const actions_diag = try update_idx_diag.child(.{ .field = "actions" });
+            inline for (@typeInfo(PlayerAction).@"union".fields) |action_variant| {
+                if (@field(actions_flag, action_variant.name)) {
+                    const ActionPayload: type = action_variant.type;
+                    const ActionPayloadEncoding: type = craft_io.Encoding(ActionPayload);
+                    const action_encoding: ActionPayloadEncoding = @field(PlayerAction.ENCODING, action_variant.name);
+                    actions[actions_idx] = @unionInit(PlayerAction, action_variant.name, (try craft_io.decode(
+                        action_variant.type,
+                        reader,
+                        arena_allocator,
+                        try actions_diag.child(.{ .index = actions_idx }),
+                        action_encoding,
+                    )).unwrap(&bytes_read));
+                    actions_idx += 1;
+                }
+            }
+            update.*.player_actions = actions;
+        }
+
+        return .{
+            .value = .{ .updates = updates },
+            .bytes_read = bytes_read,
+        };
+    }
+
+    pub fn actionsFlag(self: PlayPlayerInfoUpdatePacket, diag: craft_io.Diag) !PlayerActionsFlag {
+        var flag: PlayerActionsFlag = undefined;
+        var has_any_flag: bool = false;
+        var any_error: bool = false;
+        for (self.updates, 0..) |update_item, idx| {
+            const idx_diag = try diag.child(.{ .index = idx });
+            const actions_flag = try update_item.actionsFlag(idx_diag);
+            if (!has_any_flag) {
+                flag = actions_flag;
+                has_any_flag = true;
+            } else if (flag != actions_flag) {
+                idx_diag.report(
+                    error.InconsistentPlayerActionsFlag,
+                    @typeName(@This()),
+                    "list of player actions should have same flags. expected {any}, but got {any}",
+                    .{ flag, actions_flag },
+                );
+                any_error = true;
+            }
+        }
+        if (any_error) {
+            return error.InconsistentPlayerActionsFlag;
+        } else {
+            return flag;
+        }
+    }
+};
+
+pub const PlaySetRenderDistancePacket = struct {
+    view_distance: i32,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .view_distance = .varnum,
+    };
+};
+
+pub const PlaySetSimulationDistancePacket = struct {
+    simulation_distance: i32,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .simulation_distance = .varnum,
+    };
+};
+
+pub const PlaySetCenterChunkPacket = struct {
+    chunk_x: i32,
+    chunk_z: i32,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .chunk_x = .varnum,
+        .chunk_z = .varnum,
+    };
+};
+
+pub const PlayInitializeWorldBorderPacket = struct {
+    x: f64,
+    z: f64,
+    old_diameter: f64,
+    new_diameter: f64,
+    speed: i64,
+    portal_teleport_boundary: i32,
+    warning_blocks: i32,
+    warning_time: i32,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .speed = .varnum,
+        .portal_teleport_boundary = .varnum,
+        .warning_blocks = .varnum,
+        .warning_time = .varnum,
+    };
+};
+
+pub const PlayUpdateTimePacket = struct {
+    world_age: i64,
+    time_of_day: i64,
+    time_of_day_increasing: bool,
+};
+
+pub const PlaySetDefaultSpawnPositionPacket = struct {
+    location: craft_io.Position,
+    angle: f32,
+};
