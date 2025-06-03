@@ -737,7 +737,7 @@ fn encodeArray(
         diag.ok(@typeName(Array), "encode", array_info.len, "{s}", .{data});
     } else {
         const item_encoding = encoding.items;
-        inline for (0..array_info.len) |idx| {
+        for (0..array_info.len) |idx| {
             bytes += try encode(
                 data[idx],
                 writer,
@@ -1256,7 +1256,7 @@ fn decodeArray(
         diag.ok(@typeName(Data), "decodeArray", array_info.len, "decoded bytes: {any}", .{out});
     } else {
         const items_encoding = encoding.items;
-        inline for (&out, 0..) |*elem, idx| {
+        for (&out, 0..) |*elem, idx| {
             elem.* = (try decode(
                 Payload,
                 reader,
@@ -1398,7 +1398,6 @@ fn decodeUnion(
     }
 
     const TagType: type = union_info.tag_type.?;
-    const tag_info = @typeInfo(TagType).@"enum";
     var bytes: usize = 0;
     const tag_value: TagType = (try decode(
         TagType,
@@ -1407,26 +1406,25 @@ fn decodeUnion(
         try diag.child(.tag),
         encoding.tag,
     )).unwrap(&bytes);
-    const tag_int: tag_info.tag_type = @intFromEnum(tag_value);
-    // todo is this the best way to deal with this?
-    inline for (union_info.fields, tag_info.fields) |union_field, enum_field| {
-        if (enum_field.value == tag_int) {
-            const Payload: type = union_field.type;
-            const field_encoding_provided = @hasField(UnionEncodingT, "fields") and @hasField(@TypeOf(encoding.fields), enum_field.name);
-            const payload_encoding = comptime if (field_encoding_provided) @field(encoding.fields, enum_field.name) else defaultEncoding(Payload);
+    switch (tag_value) {
+        inline else => |tag_value_comptime| {
+            const tag_name = @tagName(tag_value_comptime);
+            const Payload: type = @FieldType(Union, tag_name);
+            const field_encoding_provided = @hasField(UnionEncodingT, "fields") and @hasField(@TypeOf(encoding.fields), tag_name);
+            const payload_encoding = comptime if (field_encoding_provided) @field(encoding.fields, tag_name) else defaultEncoding(Payload);
             const payload: Payload = (try decode(
                 Payload,
                 reader,
                 allocator,
-                try diag.child(.{ .field = union_field.name }),
+                try diag.child(.{ .field = tag_name }),
                 payload_encoding,
             )).unwrap(&bytes);
-            const out: Union = @unionInit(Union, union_field.name, payload);
+            const out: Union = @unionInit(Union, tag_name, payload);
             return .{
                 .bytes_read = bytes,
                 .value = out,
             };
-        }
+        },
     }
 
     return error.InvalidEnumTag;

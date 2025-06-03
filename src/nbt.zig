@@ -175,7 +175,7 @@ pub const Tag = union(TagType) {
     pub fn formatPayload(tag: Tag, writer: anytype) !void {
         switch (tag) {
             .end => {},
-            .string => |str| try std.fmt.format(writer, "{s}", .{str}),
+            .string => |str| try std.fmt.format(writer, "\"{s}\"", .{str}),
             inline .byte,
             .short,
             .int,
@@ -276,9 +276,10 @@ pub const NamedTag = struct {
 
         try std.fmt.format(
             writer,
-            "NBT_{s}(\"{s}\"): {}",
-            .{ @tagName(@as(TagType, named_tag.tag)), named_tag.name, named_tag.tag },
+            "NBT_{s}(\"{s}\"): ",
+            .{ @tagName(@as(TagType, named_tag.tag)), named_tag.name },
         );
+        try named_tag.tag.formatPayload(writer);
     }
 };
 
@@ -441,50 +442,29 @@ fn decodeListTag(reader: anytype, allocator: std.mem.Allocator, diag: Diag) !cra
 fn decodeList(reader: anytype, allocator: std.mem.Allocator, diag: Diag) !craft_io.Decoded(Tag.List) {
     var bytes_read: usize = 0;
     const contents_type_id = (try decodeTagType(reader, try diag.child(.tag))).unwrap(&bytes_read);
-    if (contents_type_id == .end) {
-        return error.InvalidTag;
-    }
 
-    const list_length: usize = @intCast(try reader.readInt(i32, .big));
-    bytes_read += 4; // i32
+    switch (contents_type_id) {
+        .end => return error.InvalidTag,
+        inline else => |type_id| {
+            const list_length: usize = @intCast(try reader.readInt(i32, .big));
+            bytes_read += 4; // i32
 
-    inline for (
-        @typeInfo(Tag).@"union".fields,
-        @typeInfo(Tag.List).@"union".fields,
-        @typeInfo(TagType).@"enum".fields,
-    ) |
-        tag_field,
-        list_field,
-        tag_type_field,
-    | {
-        const ElemType = tag_field.type;
-        if (ElemType == void) {
-            continue;
-        }
-
-        const ExpectedListFieldType = []const ElemType;
-
-        comptime if (ExpectedListFieldType != list_field.type) {
-            @compileError("NBT Tag.List." ++ list_field.name ++ " should have type " ++ @typeName(ExpectedListFieldType) ++ " but actually has " ++ @typeName(list_field.type));
-        };
-
-        if (tag_type_field.value == @intFromEnum(contents_type_id)) {
+            const tag_name = @tagName(type_id);
+            const ElemType: type = @FieldType(Tag, tag_name);
             const out: []ElemType = try allocator.alloc(ElemType, list_length);
             errdefer allocator.free(out);
 
             for (out, 0..) |*item, idx| {
                 const item_dcd = try contents_type_id.decodeTag(reader, allocator, try diag.child(.{ .index = idx }));
                 bytes_read += item_dcd.bytes_read;
-                item.* = @field(item_dcd.value, tag_field.name);
+                item.* = @field(item_dcd.value, tag_name);
             }
             return .{
-                .value = @unionInit(Tag.List, tag_field.name, out),
+                .value = @unionInit(Tag.List, tag_name, out),
                 .bytes_read = bytes_read,
             };
-        }
+        },
     }
-
-    unreachable;
 }
 
 fn encodeList(data: Tag.List, writer: anytype) !usize {
