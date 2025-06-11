@@ -547,6 +547,7 @@ pub const TextComponent = struct {
     nbt_data: nbt.Tag,
 
     pub const CraftEncoding: type = craft_io.Encoding(nbt.Tag);
+    pub const CraftError: type = error{BadNbtForTextComponent};
 
     pub fn craftEncode(
         cmp: TextComponent,
@@ -606,7 +607,7 @@ pub const TextComponent = struct {
                     "text components are NBT tags, but only allowed to use string and compound tag types, this is a {any}",
                     .{@as(nbt.TagType, nbt_tag)},
                 );
-                return error.BadNbtForTextComponent;
+                return error.DecodeBadData;
             },
         }
     }

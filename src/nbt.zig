@@ -57,7 +57,7 @@ pub const TagType = enum(u8) {
     }
 };
 
-pub const NbtDecodeError = error{ UnknownNbtType, InvalidTag };
+pub const NbtDecodeError = error{DecodeBadData};
 
 pub fn DecodeError(comptime Reader: type) type {
     return NbtDecodeError || Reader.NoEofError || std.mem.Allocator.Error || Diag.Error;
@@ -133,6 +133,7 @@ pub const Tag = union(TagType) {
     };
 
     pub const CraftEncoding: type = void;
+    pub const CraftDecodeError: type = NbtDecodeError;
 
     pub fn craftDecode(
         reader: anytype,
@@ -228,6 +229,8 @@ pub const NamedTag = struct {
     pub const CraftEncoding: type = struct {
         root_has_no_name: bool = true,
     };
+
+    pub const CraftDecodeError: type = NbtDecodeError;
 
     pub fn craftDecode(
         reader: anytype,
@@ -376,7 +379,7 @@ fn decodeTagType(reader: anytype, diag: Diag) !craft_io.Decoded(TagType) {
             "decoded bad tag byte 0x{X:02}",
             .{tag_byte},
         );
-        return error.UnknownNbtType;
+        return error.DecodeBadData;
     };
     return .{ .bytes_read = 1, .value = tag_type };
 }
@@ -444,7 +447,7 @@ fn decodeList(reader: anytype, allocator: std.mem.Allocator, diag: Diag) !craft_
     const contents_type_id = (try decodeTagType(reader, try diag.child(.tag))).unwrap(&bytes_read);
 
     switch (contents_type_id) {
-        .end => return error.InvalidTag,
+        .end => return error.DecodeBadData,
         inline else => |type_id| {
             const list_length: usize = @intCast(try reader.readInt(i32, .big));
             bytes_read += 4; // i32

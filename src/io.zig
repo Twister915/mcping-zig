@@ -64,13 +64,22 @@ pub fn encode(
     };
 }
 
+pub const DecodeError = error{
+    PacketTooBig,
+    DecodeBadData,
+} || Diag.Error || std.mem.Allocator.Error;
+
+pub fn DecodeErrorReader(comptime Reader: type) type {
+    return DecodeError || Reader.NoEofError;
+}
+
 pub fn decode(
     comptime Data: type,
     reader: anytype,
     allocator: *std.heap.ArenaAllocator,
     diag: Diag,
     comptime encoding: Encoding(Data),
-) anyerror!Decoded(Data) {
+) DecodeErrorReader(@TypeOf(reader))!Decoded(Data) {
     if (std.meta.hasFn(Data, "craftDecode")) {
         return Data.craftDecode(reader, allocator, diag, encoding);
     }
@@ -909,7 +918,7 @@ fn decodeVarnum(comptime VarNum: type, reader: anytype, diag: Diag) !Decoded(Var
         } else if (bytes >= MAX_BYTES) {
             @branchHint(.unlikely);
             diag.report(error.VarNumTooLarge, @typeName(VarNum), "too many bytes while decoding var num", .{});
-            return error.VarNumTooLarge;
+            return error.DecodeBadData;
         }
     }
 }
@@ -923,7 +932,7 @@ fn decodeBool(reader: anytype, diag: Diag) !Decoded(bool) {
             else => |other| {
                 @branchHint(.unlikely);
                 diag.report(error.UnexpectedBoolByte, "bool", "bad bool value 0x{X:0>2}", .{other});
-                return error.UnexpectedBoolByte;
+                return error.DecodeBadData;
             },
         },
     };
@@ -960,7 +969,7 @@ fn decodePointer(
     arena_allocator: *std.heap.ArenaAllocator,
     diag: Diag,
     comptime encoding: Encoding(Data),
-) !Decoded(Data) {
+) DecodeErrorReader(@TypeOf(reader))!Decoded(Data) {
     const allocator = arena_allocator.allocator();
     const Ptr = @typeInfo(Data).pointer;
     const Payload = Ptr.child;
@@ -993,7 +1002,7 @@ fn decodePointer(
                                     "decoded length prefix {d} but expected exact size {d}",
                                     .{ count_dcd, N },
                                 );
-                                return error.ExactSizedArrayBadLengthPrefix;
+                                return error.DecodeBadData;
                             }
                         },
                         .disabled => {},
@@ -1048,7 +1057,7 @@ fn decodePointer(
                     if (Payload == u8) {
                         dst = reader.readAllAlloc(allocator, encoding.max_items) catch |err| switch (err) {
                             error.StreamTooLong => return error.PacketTooBig,
-                            else => return err,
+                            inline else => |e| return e,
                         };
                         errdefer allocator.free(dst);
                         bytes = dst.len;
@@ -1357,7 +1366,7 @@ fn decodeEnum(
                 "decoded an invalid enum tag, got the value {d}",
                 .{wire_tag_value},
             );
-            return error.InvalidEnumTag;
+            return error.DecodeBadData;
         } else if (WireTag == enum_info.tag_type) {
             // there is no custom craft tag function, so use the built-in tag type for this enum (an integer type)
             break :compute_value std.meta.intToEnum(Enum, wire_tag_value) catch |err| {
@@ -1369,7 +1378,7 @@ fn decodeEnum(
                         .{wire_tag_value},
                     );
                 }
-                return err;
+                return error.DecodeBadData;
             };
         } else {
             // the WireTag was not the enum tag type, this is a compile error
@@ -1427,7 +1436,7 @@ fn decodeUnion(
         },
     }
 
-    return error.InvalidEnumTag;
+    return error.DecodeBadData;
 }
 
 fn decodeJson(
@@ -1449,7 +1458,7 @@ fn decodeJson(
             "failed to JSON decode ({any}) from string: {s}",
             .{ err, str_decode.value },
         );
-        return error.FailedJsonDecode;
+        return error.DecodeBadData;
     };
     return .{
         .value = parsed,
