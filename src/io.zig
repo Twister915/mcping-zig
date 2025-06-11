@@ -1608,7 +1608,7 @@ pub const Position = packed struct {
 };
 
 pub fn IdOr(comptime Payload: type) type {
-    return union {
+    return union(enum) {
         id: i32,
         other: Payload,
 
@@ -1685,6 +1685,21 @@ pub fn IdOr(comptime Payload: type) type {
                 .bytes_read = bytes_read,
                 .value = out,
             };
+        }
+
+        pub fn format(
+            data: Self,
+            comptime fmt: []const u8,
+            options: std.fmt.FormatOptions,
+            writer: anytype,
+        ) !void {
+            _ = fmt;
+            _ = options;
+
+            switch (data) {
+                .id => |id| try std.fmt.format(writer, "IdOr(id = {d})", .{id}),
+                .other => |payload| try std.fmt.format(writer, "IdOr(payload = {any})", .{payload}),
+            }
         }
     };
 }

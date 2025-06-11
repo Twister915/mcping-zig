@@ -1722,6 +1722,7 @@ pub const PlayClientboundPacketID = enum(i32) {
     set_held_item = 0x62,
     set_simulation_distance = 0x68,
     update_time = 0x6A,
+    sound_effect = 0x6E,
     system_chat_message = 0x72,
     set_ticking_state = 0x78,
     step_tick = 0x79,
@@ -1754,6 +1755,7 @@ pub const PlayClientboundPacketID = enum(i32) {
             .set_held_item => PlaySetHeldItemPacket,
             .set_simulation_distance => PlaySetSimulationDistancePacket,
             .update_time => PlayUpdateTimePacket,
+            .sound_effect => PlaySoundEffectPacket,
             .system_chat_message => PlaySystemChatMessagePacket,
             .set_ticking_state => PlaySetTickingStatePacket,
             .step_tick => PlayStepTickPacket,
@@ -2854,5 +2856,22 @@ pub const PlaySetHealthPacket = struct {
 
     pub const ENCODING: craft_io.Encoding(@This()) = .{
         .food = .varnum,
+    };
+};
+
+pub const PlaySoundEffectPacket = struct {
+    sound_event: craft_io.IdOr(SoundEvent),
+    category: i32,
+    position: struct {
+        x: i32,
+        y: i32,
+        z: i32,
+    },
+    volume: f32,
+    pitch: f32,
+    seed: i64,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .category = .varnum,
     };
 };
