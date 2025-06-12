@@ -17,12 +17,13 @@ pub const HandshakingPacket = struct {
         status = 1,
         login = 2,
         transfer = 3,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
     },
 
     const Encoding = craft_io.Encoding(@This());
     pub const ENCODING: Encoding = .{
         .version = .varnum,
-        .next_state = .varnum,
         .address = .{ .max_items = 0xFF },
     };
 };
@@ -189,8 +190,9 @@ test "encode login success packet" {
 pub const SetCompressionPacket = struct {
     threshold: i32,
 
-    pub const Encoding = craft_io.Encoding(@This());
-    pub const ENCODING: Encoding = .{ .threshold = .varnum };
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .threshold = .varnum,
+    };
 };
 
 pub const LoginPluginRequestPacket = struct {
@@ -198,8 +200,7 @@ pub const LoginPluginRequestPacket = struct {
     channel: []const u8, // identifer
     data: []const u8,
 
-    pub const Encoding = craft_io.Encoding(@This());
-    pub const ENCODING: Encoding = .{
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
         .channel = .{ .max_items = MAX_IDENTIFIER_SIZE },
         .data = .{ .max_items = 0x100000, .length = .disabled },
     };
@@ -213,8 +214,7 @@ pub const LoginStartPacket = struct {
     name: []const u8,
     uuid: UUID,
 
-    pub const Encoding = craft_io.Encoding(@This());
-    pub const ENCODING: Encoding = .{
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
         .name = .{ .max_items = 0x10 },
     };
 };
@@ -228,8 +228,7 @@ pub const LoginPluginResponsePacket = struct {
     message_id: i32,
     data: ?[]const u8,
 
-    pub const Encoding = craft_io.Encoding(@This());
-    pub const ENCODING: Encoding = .{
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
         .message_id = .varnum,
         .data = .{ .max_items = 0x100000, .length = .disabled },
     };
@@ -239,8 +238,7 @@ pub const CookieResponsePacket = struct {
     key: []const u8,
     payload: ?[]const u8, // optional bytes
 
-    pub const Encoding = craft_io.Encoding(@This());
-    pub const ENCODING: Encoding = .{
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
         .key = .{ .max_items = MAX_IDENTIFIER_SIZE },
         .payload = .{ .max_items = 0x1400 },
     };
@@ -253,6 +251,8 @@ pub const ConfigClientInformationPacket = struct {
         enabled = 0,
         commands_only = 1,
         hidden = 2,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
     },
     chat_colors: bool,
     displayed_skin_parts: packed struct {
@@ -267,6 +267,8 @@ pub const ConfigClientInformationPacket = struct {
     main_hand: enum(i32) {
         left = 0,
         right = 1,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
     },
     enable_text_filtering: bool,
     allow_server_listings: bool,
@@ -274,14 +276,12 @@ pub const ConfigClientInformationPacket = struct {
         all = 0,
         decreased = 1,
         minimal = 2,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
     },
 
-    pub const Encoding = craft_io.Encoding(@This());
-    pub const ENCODING: Encoding = .{
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
         .locale = .{ .max_items = 16 },
-        .chat_mode = .varnum,
-        .main_hand = .varnum,
-        .particle_status = .varnum,
     };
 };
 
