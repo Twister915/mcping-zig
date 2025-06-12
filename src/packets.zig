@@ -1722,6 +1722,8 @@ pub const PlayClientboundPacketID = enum(i32) {
     set_center_chunk = 0x57,
     set_render_distance = 0x58,
     set_default_spawn_position = 0x5A,
+    set_entity_metadata = 0x5C,
+    set_entity_velocity = 0x5E,
     set_equiptment = 0x5F,
     set_experience = 0x60,
     set_health = 0x61,
@@ -1762,6 +1764,8 @@ pub const PlayClientboundPacketID = enum(i32) {
             .set_center_chunk => PlaySetCenterChunkPacket,
             .set_render_distance => PlaySetRenderDistancePacket,
             .set_default_spawn_position => PlaySetDefaultSpawnPositionPacket,
+            .set_entity_metadata => PlaySetEntityMetadataPacket,
+            .set_entity_velocity => PlaySetEntityVelocityPacket,
             .set_equiptment => PlaySetEquiptmentPacket,
             .set_experience => PlaySetExperiencePacket,
             .set_health => PlaySetHealthPacket,
@@ -3117,5 +3121,590 @@ pub const PlaySpawnEntityPacket = struct {
         .entity_id = .varnum,
         .type = .varnum,
         .data = .varnum,
+    };
+};
+
+pub const ParticleID = enum(i32) {
+    angry_villager = 0,
+    block = 1,
+    block_marker = 2,
+    bubble = 3,
+    cloud = 4,
+    crit = 5,
+    damage_indicator = 6,
+    dragon_breath = 7,
+    dripping_lava = 8,
+    falling_lava = 9,
+    landing_lava = 10,
+    dripping_water = 11,
+    falling_water = 12,
+    dust = 13,
+    dust_color_transition = 14,
+    effect = 15,
+    elder_guardian = 16,
+    enchanted_hit = 17,
+    enchant = 18,
+    end_rod = 19,
+    entity_effect = 20,
+    explosion_emitter = 21,
+    explosion = 22,
+    gust = 23,
+    small_gust = 24,
+    gust_emitter_large = 25,
+    gust_emitter_small = 26,
+    sonic_bool = 27,
+    falling_dust = 28,
+    firework = 29,
+    fishing = 30,
+    flame = 31,
+    infested = 32,
+    cherry_leaves = 33,
+    pale_oak_leaves = 34,
+    tinted_leaves = 35,
+    sculk_soul = 36,
+    sculk_charge = 37,
+    sculk_charge_pop = 38,
+    soul_fire_flame = 39,
+    soul = 40,
+    flash = 41,
+    happy_villager = 42,
+    composter = 43,
+    heart = 44,
+    instant_effect = 45,
+    item = 46,
+    vibration = 47,
+    trail = 48,
+    item_slime = 49,
+    item_cobweb = 50,
+    item_snowball = 51,
+    large_smoke = 52,
+    lava = 53,
+    mycelium = 54,
+    note = 55,
+    poof = 56,
+    portal = 57,
+    rain = 58,
+    smoke = 59,
+    white_smoke = 60,
+    sneeze = 61,
+    spit = 62,
+    squid_ink = 63,
+    sweep_attack = 64,
+    totem_of_undying = 65,
+    underwater = 66,
+    splash = 67,
+    witch = 68,
+    bubble_pop = 69,
+    current_down = 70,
+    bubble_column_up = 71,
+    nautilus = 72,
+    dolphin = 73,
+    campfire_cosy_smoke = 74,
+    campfire_signal_smoke = 75,
+    dripping_honey = 76,
+    falling_honey = 77,
+    landing_honey = 78,
+    falling_nectar = 79,
+    falling_spore_blossom = 80,
+    ash = 81,
+    crimson_spore = 83,
+    spore_blossom_air = 84,
+    dripping_obsidian_tear = 85,
+    falling_obsidian_tear = 86,
+    landing_obsidian_tear = 87,
+    reverse_portal = 88,
+    white_ash = 89,
+    small_flame = 90,
+    snowflake = 91,
+    dripping_dripstone_lava = 92,
+    falling_dripstone_lava = 93,
+    dripping_dripstone_water = 94,
+    falling_dripstone_water = 95,
+    glow_squid_ink = 96,
+    glow = 97,
+    wax_on = 98,
+    wax_off = 99,
+    electric_spark = 100,
+    scrape = 101,
+    shriek = 102,
+    egg_crack = 103,
+    dust_plume = 104,
+    trial_spawner_detection = 105,
+    trial_spawner_detection_ominous = 106,
+    vault_connection = 107,
+    dust_pillar = 108,
+    ominous_spawning = 109,
+    raid_omen = 110,
+    trial_omen = 111,
+    block_crumble = 112,
+    firefly = 113,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+};
+
+pub const Color = struct {
+    alpha: u8,
+    red: u8,
+    green: u8,
+    blue: u8,
+};
+
+pub const PositionSourceType = enum(i32) {
+    block = 0,
+    entity = 1,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+};
+
+pub const PositionSource = union(PositionSourceType) { block: struct {
+    block_position: craft_io.Position,
+}, entity: struct {
+    entity_id: i32,
+    entity_eye_height: f32,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .entity_id = .varnum,
+    };
+} };
+
+pub const Particle = union(ParticleID) {
+    pub const BlockParticleData = struct {
+        block_state: i32,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .block_state = .varnum,
+        };
+    };
+
+    angry_villager,
+    block: BlockParticleData,
+    block_marker: BlockParticleData,
+    bubble,
+    cloud,
+    crit,
+    damage_indicator,
+    dragon_breath,
+    dripping_lava,
+    falling_lava,
+    landing_lava,
+    dripping_water,
+    falling_water,
+    dust: struct {
+        color: Color,
+        scale: f32,
+    },
+    dust_color_transition: struct {
+        from_color: Color,
+        to_color: Color,
+        scale: f32,
+    },
+    effect,
+    elder_guardian,
+    enchanted_hit,
+    enchant,
+    end_rod,
+    entity_effect: struct {
+        color: Color,
+    },
+    explosion_emitter,
+    explosion,
+    gust,
+    small_gust,
+    gust_emitter_large,
+    gust_emitter_small,
+    sonic_bool,
+    falling_dust: BlockParticleData,
+    firework,
+    fishing,
+    flame,
+    infested,
+    cherry_leaves,
+    pale_oak_leaves,
+    tinted_leaves: struct {
+        color: Color,
+    },
+    sculk_soul,
+    sculk_charge: struct {
+        roll: f32,
+    },
+    sculk_charge_pop,
+    soul_fire_flame,
+    soul,
+    flash,
+    happy_villager,
+    composter,
+    heart,
+    instant_effect,
+    item: struct {
+        item: Slot,
+    },
+    vibration: struct {
+        position: PositionSource,
+        ticks: i32,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .ticks = .varnum,
+        };
+    },
+    trail: struct {
+        target: Vector3(f64),
+        color: Color,
+        duration: i32,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .duration = .varnum,
+        };
+    },
+    item_slime,
+    item_cobweb,
+    item_snowball,
+    large_smoke,
+    lava,
+    mycelium,
+    note,
+    poof,
+    portal,
+    rain,
+    smoke,
+    white_smoke,
+    sneeze,
+    spit,
+    squid_ink,
+    sweep_attack,
+    totem_of_undying,
+    underwater,
+    splash,
+    witch,
+    bubble_pop,
+    current_down,
+    bubble_column_up,
+    nautilus,
+    dolphin,
+    campfire_cosy_smoke,
+    campfire_signal_smoke,
+    dripping_honey,
+    falling_honey,
+    landing_honey,
+    falling_nectar,
+    falling_spore_blossom,
+    ash,
+    crimson_spore,
+    spore_blossom_air,
+    dripping_obsidian_tear,
+    falling_obsidian_tear,
+    landing_obsidian_tear,
+    reverse_portal,
+    white_ash,
+    small_flame,
+    snowflake,
+    dripping_dripstone_lava,
+    falling_dripstone_lava,
+    dripping_dripstone_water,
+    falling_dripstone_water,
+    glow_squid_ink,
+    glow,
+    wax_on,
+    wax_off,
+    electric_spark,
+    scrape,
+    shriek: struct {
+        delay: i32,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .delay = .varnum,
+        };
+    },
+    egg_crack,
+    dust_plume,
+    trial_spawner_detection,
+    trial_spawner_detection_ominous,
+    vault_connection,
+    dust_pillar: BlockParticleData,
+    ominous_spawning,
+    raid_omen,
+    trial_omen,
+    block_crumble: BlockParticleData,
+    firefly,
+};
+
+pub const EntityMetadata = struct {
+    pub const Entry = struct {
+        index: u8,
+        value: Value,
+    };
+
+    pub const ValueType = enum(i32) {
+        byte = 0,
+        varint = 1,
+        varlong = 2,
+        float = 3,
+        string = 4,
+        text_component = 5,
+        optional_text_component = 6,
+        slot = 7,
+        boolean = 8,
+        rotations = 9,
+        position = 10,
+        optional_position = 11,
+        direction = 12,
+        optional_living_entity_reference = 13,
+        block_state = 14,
+        optional_block_state = 15,
+        nbt = 16,
+        particle = 17,
+        particles = 18,
+        villager_data = 19,
+        optional_varint = 20,
+        pose = 21,
+        cat_variant = 22,
+        cow_variant = 23,
+        wolf_variant = 24,
+        wolf_sound_variant = 25,
+        frog_variant = 26,
+        pig_variant = 27,
+        chicken_variant = 28,
+        optional_global_position = 29,
+        painting_variant = 30,
+        sniffer_state = 31,
+        armadillo_state = 32,
+        vector3 = 33,
+        quaternion = 34,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+    };
+
+    pub const Value = union(ValueType) {
+        byte: u8,
+        varint: i32,
+        varlong: i64,
+        float: f32,
+        string: []const u8,
+        text_component: TextComponent,
+        optional_text_component: ?TextComponent,
+        slot: Slot,
+        boolean: bool,
+        rotations: Vector3(f32),
+        position: craft_io.Position,
+        optional_position: ?craft_io.Position,
+        direction: enum(i32) {
+            down = 0,
+            up = 1,
+            north = 2,
+            south = 3,
+            west = 4,
+            east = 5,
+
+            pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+        },
+        optional_living_entity_reference: ?UUID,
+        block_state: i32,
+        optional_block_state: i32, // 0 = air, otherwise id in block state registry
+        nbt: nbt.NamedTag,
+        particle: Particle,
+        particles: []const Particle,
+        villager_data: struct {
+            type: i32,
+            profession: i32,
+            level: i32,
+
+            pub const ENCODING: craft_io.Encoding(@This()) = .{
+                .type = .varnum,
+                .profession = .varnum,
+                .level = .varnum,
+            };
+        },
+        optional_varint: i32, // 0 == absent, otherwise value + 1
+        pose: enum(i32) {
+            standing = 0,
+            fall_flying = 1,
+            sleeping = 2,
+            swimming = 3,
+            spin_attack = 4,
+            sneaking = 5,
+            long_jumping = 6,
+            dying = 7,
+            croaking = 8,
+            using_tongue = 9,
+            sitting = 10,
+            roaring = 11,
+            sniffing = 12,
+            emerging = 13,
+            digging = 14,
+            sliding = 15,
+            shooting = 16,
+            inhaling = 17,
+
+            pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+        },
+        cat_variant: i32,
+        cow_variant: i32,
+        wolf_variant: i32,
+        wolf_sound_variant: i32,
+        frog_variant: i32,
+        pig_variant: i32,
+        chicken_variant: i32,
+        optional_global_position: ?struct {
+            id: []const u8,
+            position: craft_io.Position,
+
+            pub const ENCODING: craft_io.Encoding(@This()) = .{
+                .id = .{ .max_items = MAX_IDENTIFIER_SIZE },
+            };
+        },
+        painting_variant: craft_io.IdOr(PaintingVariant),
+        sniffer_state: enum(i32) {
+            idling = 0,
+            feeling_happy = 1,
+            scenting = 2,
+            sniffing = 3,
+            searching = 4,
+            digging = 5,
+            rising = 6,
+
+            pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+        },
+        armadillo_state: enum(i32) {
+            idle = 0,
+            rolling = 1,
+            scared = 2,
+            unrolling = 3,
+
+            pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+        },
+        vector3: Vector3(f32),
+        quaternion: struct {
+            x: f32,
+            y: f32,
+            z: f32,
+            w: f32,
+        },
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .fields = .{
+                .varint = .varnum,
+                .varlong = .varnum,
+                .string = .{ .max_items = MAX_IDENTIFIER_SIZE },
+                .block_state = .varnum,
+                .optional_block_state = .varnum,
+                .optional_varint = .varnum,
+                .cat_variant = .varnum,
+                .cow_variant = .varnum,
+                .wolf_variant = .varnum,
+                .wolf_sound_variant = .varnum,
+                .frog_variant = .varnum,
+                .pig_variant = .varnum,
+                .chicken_variant = .varnum,
+            },
+        };
+    };
+
+    entries: []const Entry,
+
+    pub const CraftEncoding: type = struct {
+        value: craft_io.Encoding(Value),
+    };
+
+    pub const ENCODING: CraftEncoding = .{
+        .value = craft_io.defaultEncoding(Value),
+    };
+
+    const SENTINEL_INDEX_VALUE: u8 = 0xff;
+
+    pub fn craftEncode(
+        md: EntityMetadata,
+        writer: anytype,
+        allocator: std.mem.Allocator,
+        diag: Diag,
+        comptime encoding: CraftEncoding,
+    ) !usize {
+        var bytes_written: usize = 0;
+
+        const entries_diag = try diag.child(.{ .field = "entries" });
+        for (md.entries, 0..) |entry, idx| {
+            const idx_diag = try entries_diag.child(.{ .index = idx });
+            bytes_written += try craft_io.encode(
+                entry,
+                writer,
+                allocator,
+                idx_diag,
+                .{ .value = encoding.value },
+            );
+        }
+        const last_idx_diag = try entries_diag.child(.{ .index = md.entries.len });
+        const last_idx_index_diag = try last_idx_diag.child(.{ .field = "index" });
+        bytes_written += try craft_io.encode(
+            SENTINEL_INDEX_VALUE,
+            writer,
+            allocator,
+            last_idx_index_diag,
+            {},
+        );
+        return bytes_written;
+    }
+
+    pub fn craftDecode(
+        reader: anytype,
+        arena_allocator: *std.heap.ArenaAllocator,
+        diag: Diag,
+        comptime encoding: CraftEncoding,
+    ) craft_io.DecodeRet(@This(), @TypeOf(reader)) {
+        var bytes_read: usize = 0;
+
+        const allocator = arena_allocator.allocator();
+        var al: std.ArrayList(Entry) = .init(allocator);
+        defer al.deinit();
+
+        var idx: usize = 0;
+        const entries_diag = try diag.child(.{ .field = "entries" });
+        while (true) {
+            const idx_diag = try entries_diag.child(.{ .index = idx });
+            const index_diag = try idx_diag.child(.{ .field = "index" });
+
+            const index: u8 = (try craft_io.decode(
+                u8,
+                reader,
+                arena_allocator,
+                index_diag,
+                {},
+            )).unwrap(&bytes_read);
+            if (index == SENTINEL_INDEX_VALUE) {
+                break;
+            }
+
+            const value_diag = try idx_diag.child(.{ .field = "value" });
+            const value = (try craft_io.decode(
+                Value,
+                reader,
+                arena_allocator,
+                value_diag,
+                encoding.value,
+            )).unwrap(&bytes_read);
+
+            try al.append(.{ .index = index, .value = value });
+            idx += 1;
+        }
+
+        return .{
+            .value = .{ .entries = try al.toOwnedSlice() },
+            .bytes_read = bytes_read,
+        };
+    }
+};
+
+pub const PlaySetEntityMetadataPacket = struct {
+    entity_id: i32,
+    metadata: EntityMetadata,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .entity_id = .varnum,
+    };
+};
+
+pub const PlaySetEntityVelocityPacket = struct {
+    entity_id: i32,
+    velocity: Vector3(i16),
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .entity_id = .varnum,
     };
 };

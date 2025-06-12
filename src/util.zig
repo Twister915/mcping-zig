@@ -29,3 +29,16 @@ pub fn hexCharFor(hb: u4) u8 {
         return @as(u8, @intCast(hb - 10)) + 'a';
     }
 }
+
+pub fn shouldDiagPrintBytes(bs: []const u8) bool {
+    if (bs.len > 2048) {
+        return false;
+    }
+
+    for (bs) |b| {
+        if (!std.ascii.isPrint(b)) {
+            return false;
+        }
+    }
+    return true;
+}

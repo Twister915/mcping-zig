@@ -1,5 +1,6 @@
 const std = @import("std");
 const Diag = @import("Diag.zig");
+const util = @import("util.zig");
 
 pub const MAX_PACKET_SIZE: usize = 0x1FFFFF;
 pub const MAX_IDENTIFIER_SIZE: usize = 0x7FFF;
@@ -1077,7 +1078,17 @@ fn decodePointer(
                         };
                         errdefer allocator.free(dst);
                         bytes = dst.len;
-                        diag.ok(@typeName(Data), "decode", dst.len, "{s}", .{dst});
+                        if (util.shouldDiagPrintBytes(dst)) {
+                            diag.ok(
+                                @typeName(Data),
+                                "decode",
+                                dst.len,
+                                "{s}",
+                                .{dst},
+                            );
+                        } else {
+                            diag.ok(@typeName(Data), "decode", dst.len, "[{d} bytes]", .{bytes});
+                        }
                     } else {
                         @compileError(@typeName(Data) ++ " cannot be decoded without length prefix (unsupported, but TODO)");
                     }
@@ -1120,7 +1131,23 @@ fn decodePointer(
                     if (Payload == u8) {
                         try reader.readNoEof(dst);
                         bytes += count;
-                        diag.ok(@typeName(Data), "decode", count, "{s}", .{dst});
+                        if (util.shouldDiagPrintBytes(dst)) {
+                            diag.ok(
+                                @typeName(Data),
+                                "decode",
+                                count,
+                                "{s}",
+                                .{dst},
+                            );
+                        } else {
+                            diag.ok(
+                                @typeName(Data),
+                                "decode",
+                                count,
+                                "[{d} bytes]",
+                                .{count},
+                            );
+                        }
                     } else {
                         for (dst, 0..) |*item, idx| {
                             item.* = (try decode(
@@ -1642,7 +1669,7 @@ pub fn IdOr(comptime Payload: type) type {
             switch (id_or) {
                 .id => |id_value| {
                     return encode(
-                        id_value,
+                        id_value + 1,
                         writer,
                         allocator,
                         diag,
@@ -1695,7 +1722,7 @@ pub fn IdOr(comptime Payload: type) type {
                     encoding,
                 )).unwrap(&bytes_read) };
             } else {
-                out = .{ .id = id_value };
+                out = .{ .id = id_value - 1 };
             }
             return .{
                 .bytes_read = bytes_read,
