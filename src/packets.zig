@@ -1774,7 +1774,7 @@ pub const PlayClientboundPacketID = enum(i32) {
             .set_default_spawn_position => PlaySetDefaultSpawnPositionPacket,
             .set_entity_metadata => PlaySetEntityMetadataPacket,
             .set_entity_velocity => PlaySetEntityVelocityPacket,
-            .set_equipment => PlaySetEquiptmentPacket,
+            .set_equipment => PlaySetEquipmentPacket,
             .set_experience => PlaySetExperiencePacket,
             .set_health => PlaySetHealthPacket,
             .set_held_item => PlaySetHeldItemPacket,
@@ -3036,8 +3036,8 @@ pub const PlayUpdateAttributesPacket = struct {
     };
 };
 
-pub const PlaySetEquiptmentPacket = struct {
-    pub const EquiptmentSlot = enum(u8) {
+pub const PlaySetEquipmentPacket = struct {
+    pub const EquipmentSlot = enum(u8) {
         main_hand = 0,
         off_hand = 1,
         boots = 2,
@@ -3047,15 +3047,15 @@ pub const PlaySetEquiptmentPacket = struct {
         body = 6,
     };
 
-    pub const Equiptment = struct {
-        slot: EquiptmentSlot,
+    pub const Equipment = struct {
+        slot: EquipmentSlot,
         item: Slot,
     };
 
     // some helper types for encoding / decoding
     // a u7 version of the same u8 byte enum
-    const EquiptmentSlotU7: type = @Type(.{ .@"enum" = .{
-        .fields = @typeInfo(EquiptmentSlot).@"enum".fields,
+    const EquipmentSlotU7: type = @Type(.{ .@"enum" = .{
+        .fields = @typeInfo(EquipmentSlot).@"enum".fields,
         .tag_type = u7,
         .decls = &.{},
         .is_exhaustive = true,
@@ -3064,7 +3064,7 @@ pub const PlaySetEquiptmentPacket = struct {
     // flag and slot as a u8, where MSB is "has_more" and
     // rest (7 bits) is the slot enum
     const FlagAndSlot = packed struct {
-        slot: EquiptmentSlotU7,
+        slot: EquipmentSlotU7,
         has_more: bool,
     };
 
@@ -3075,18 +3075,18 @@ pub const PlaySetEquiptmentPacket = struct {
     };
 
     entity_id: i32,
-    equipment: []const Equiptment,
+    equipment: []const Equipment,
 
     pub const ENCODING: craft_io.Encoding(@This()) = .{
         .entity_id = .varnum,
     };
 
     pub fn craftEncode(
-        packet: PlaySetEquiptmentPacket,
+        packet: PlaySetEquipmentPacket,
         writer: anytype,
         allocator: std.mem.Allocator,
         diag: Diag,
-        comptime encoding: craft_io.Encoding(PlaySetEquiptmentPacket),
+        comptime encoding: craft_io.Encoding(PlaySetEquipmentPacket),
     ) !usize {
         var bytes_written: usize = 0;
 
@@ -3127,10 +3127,10 @@ pub const PlaySetEquiptmentPacket = struct {
         reader: anytype,
         arena_allocator: *std.heap.ArenaAllocator,
         diag: Diag,
-        comptime encoding: craft_io.Encoding(PlaySetEquiptmentPacket),
-    ) craft_io.DecodeRet(PlaySetEquiptmentPacket, @TypeOf(reader)) {
+        comptime encoding: craft_io.Encoding(PlaySetEquipmentPacket),
+    ) craft_io.DecodeRet(PlaySetEquipmentPacket, @TypeOf(reader)) {
         var bytes_read: usize = 0;
-        var out: PlaySetEquiptmentPacket = undefined;
+        var out: PlaySetEquipmentPacket = undefined;
         out.entity_id = (try craft_io.decode(
             i32,
             reader,
@@ -3141,7 +3141,7 @@ pub const PlaySetEquiptmentPacket = struct {
 
         // literally wtf
         const allocator = arena_allocator.allocator();
-        var al: std.ArrayList(Equiptment) = .init(allocator);
+        var al: std.ArrayList(Equipment) = .init(allocator);
         defer al.deinit();
 
         const equipment_diag = try diag.child(.{ .field = "equipment" });
