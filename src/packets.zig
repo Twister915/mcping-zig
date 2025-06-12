@@ -1699,6 +1699,7 @@ pub const SlotDisplay = union(SlotDisplayType) {
 
 pub const PlayClientboundPacketID = enum(i32) {
     spawn_entity = 0x01,
+    block_update = 0x08,
     change_difficulty = 0x0A,
     set_container_content = 0x12,
     set_container_slot = 0x14,
@@ -1744,6 +1745,7 @@ pub const PlayClientboundPacketID = enum(i32) {
     pub fn Payload(comptime id: PlayClientboundPacketID) type {
         return switch (id) {
             .spawn_entity => PlaySpawnEntityPacket,
+            .block_update => PlayBlockUpdatePacket,
             .change_difficulty => PlayChangeDifficultyPacket,
             .set_container_content => PlaySetContainerContentPacket,
             .set_container_slot => PlaySetContainerSlotPacket,
@@ -3784,6 +3786,15 @@ pub const PlaySetEntityVelocityPacket = struct {
 
     pub const ENCODING: craft_io.Encoding(@This()) = .{
         .entity_id = .varnum,
+    };
+};
+
+pub const PlayBlockUpdatePacket = struct {
+    location: craft_io.Position,
+    block_id: i32,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .block_id = .varnum,
     };
 };
 
