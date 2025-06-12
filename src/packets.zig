@@ -1713,6 +1713,7 @@ pub const PlayClientboundPacketID = enum(i32) {
     map_data = 0x2C,
     move_entity_position = 0x2E,
     update_entity_position_and_rotation = 0x2F,
+    update_entity_rotation = 0x31,
     player_abilities = 0x39,
     player_info_update = 0x3F,
     synchronize_player_position = 0x41,
@@ -1757,6 +1758,7 @@ pub const PlayClientboundPacketID = enum(i32) {
             .map_data => PlayMapDataPacket,
             .move_entity_position => PlayMoveEntityPositionPacket,
             .update_entity_position_and_rotation => PlayUpdateEntityPositionAndRotationPacket,
+            .update_entity_rotation => PlayUpdateEntityRotationPacket,
             .player_abilities => PlayPlayerAbilitiesPacket,
             .player_info_update => PlayPlayerInfoUpdatePacket,
             .synchronize_player_position => PlaySynchronizePlayerPositionPacket,
@@ -3805,4 +3807,15 @@ pub const PlayUpdateSectionBlocksPacket = struct {
 
     chunk_section_position: ChunkPosition,
     blocks: []const BlockUpdate,
+};
+
+pub const PlayUpdateEntityRotationPacket = struct {
+    entity_id: i32,
+    yaw: i8,
+    pitch: i8,
+    on_ground: bool,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .entity_id = .varnum,
+    };
 };
