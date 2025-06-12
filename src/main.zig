@@ -15,26 +15,28 @@ test {
 }
 
 // turn this on (and build with runtime_safety = true) to see EVERYTHING
-pub const DIAG_REPORT_OK: bool = true;
+pub const DIAG_REPORT_OK: bool = true and std.debug.runtime_safety;
 
 pub const std_options: std.Options = .{
     .log_level = if (std.debug.runtime_safety) .debug else .info,
     .log_scope_levels = &.{
-        .{ .scope = Diag.diag_log_scope, .level = .info },
+        .{ .scope = Diag.diag_log_scope, .level = if (DIAG_REPORT_OK) .debug else .info },
     },
-};
-
-pub const gpa_config: std.heap.GeneralPurposeAllocatorConfig = .{
-    .verbose_log = std.debug.runtime_safety,
+    .fmt_max_depth = 10,
 };
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(gpa_config).init;
-    if (std.debug.runtime_safety) {
-        defer _ = gpa.detectLeaks();
-    }
-
-    const allocator = gpa.allocator();
+    const allocator = alloc: {
+        if (std.debug.runtime_safety) {
+            var gpa = std.heap.GeneralPurposeAllocator(
+                .{ .verbose_log = std.debug.runtime_safety },
+            ).init;
+            defer _ = gpa.detectLeaks();
+            break :alloc gpa.allocator();
+        } else {
+            break :alloc std.heap.smp_allocator;
+        }
+    };
 
     var any: bool = false;
     var args = std.process.args();

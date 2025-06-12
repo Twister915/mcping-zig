@@ -73,13 +73,32 @@ pub fn DecodeErrorReader(comptime Reader: type) type {
     return DecodeError || Reader.NoEofError;
 }
 
+pub fn DecodeRet(comptime Data: type, comptime Reader: type) type {
+    return DecodeErrorReader(Reader)!Decoded(Data);
+}
+
+pub fn Decoded(comptime T: type) type {
+    return struct {
+        value: T,
+        bytes_read: usize,
+
+        pub fn unwrap(self: @This(), byte_counter: ?*usize) T {
+            if (byte_counter) |ctr_ptr| {
+                ctr_ptr.* += self.bytes_read;
+            }
+
+            return self.value;
+        }
+    };
+}
+
 pub fn decode(
     comptime Data: type,
     reader: anytype,
     allocator: *std.heap.ArenaAllocator,
     diag: Diag,
     comptime encoding: Encoding(Data),
-) DecodeErrorReader(@TypeOf(reader))!Decoded(Data) {
+) DecodeRet(Data, @TypeOf(reader)) {
     if (std.meta.hasFn(Data, "craftDecode")) {
         return Data.craftDecode(reader, allocator, diag, encoding);
     }
@@ -867,21 +886,6 @@ fn encodeJson(
     return encode(buf.items, writer, allocator, encoding.string_encoding);
 }
 
-pub fn Decoded(comptime T: type) type {
-    return struct {
-        value: T,
-        bytes_read: usize,
-
-        pub fn unwrap(self: @This(), byte_counter: ?*usize) T {
-            if (byte_counter) |ctr_ptr| {
-                ctr_ptr.* += self.bytes_read;
-            }
-
-            return self.value;
-        }
-    };
-}
-
 pub fn decodeInt(
     comptime Int: type,
     reader: anytype,
@@ -894,7 +898,10 @@ pub fn decodeInt(
             const NUM_BITS = @bitSizeOf(Int);
             const BYTES = comptime std.math.divCeil(usize, NUM_BITS, 8) catch unreachable;
 
-            const decoded: Int = try reader.readInt(Int, .big);
+            const decoded: Int = reader.readInt(Int, .big) catch |err| {
+                diag.report(err, typ, "failed to decode int", .{});
+                return err;
+            };
             diag.ok(typ, "decode", BYTES, "{d}", .{decoded});
             return .{ .bytes_read = BYTES, .value = decoded };
         },
@@ -908,7 +915,11 @@ fn decodeVarnum(comptime VarNum: type, reader: anytype, diag: Diag) !Decoded(Var
     var decoded: VarNum = 0;
     var bytes: usize = 0;
     while (true) {
-        const b: u8 = try reader.readByte();
+        const b: u8 = reader.readByte() catch |err| {
+            diag.report(err, @typeName(VarNum), "failed to decode byte for varnum", .{});
+            return err;
+        };
+
         const data: VarNum = @intCast(b & 0x7F);
         decoded |= data << @intCast(7 * bytes);
         bytes += 1;
@@ -924,9 +935,14 @@ fn decodeVarnum(comptime VarNum: type, reader: anytype, diag: Diag) !Decoded(Var
 }
 
 fn decodeBool(reader: anytype, diag: Diag) !Decoded(bool) {
+    const byte = reader.readByte() catch |err| {
+        diag.report(err, "bool", "failed to read byte for a bool", .{});
+        return err;
+    };
+
     const out: Decoded(bool) = .{
         .bytes_read = 1,
-        .value = switch (try reader.readByte()) {
+        .value = switch (byte) {
             0x00 => false,
             0x01 => true,
             else => |other| {

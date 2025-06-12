@@ -10,8 +10,6 @@ const BufReader = std.io.BufferedReader(BUF_SIZE, net.Stream.Reader);
 const log = std.log.scoped(.craft_conn);
 
 socket: net.Stream,
-address: []const u8,
-port: u16,
 reader: BufReader,
 buf: std.ArrayList(u8),
 compression: ?Compression = null,
@@ -35,8 +33,6 @@ pub fn connect(allocator: std.mem.Allocator, address: []const u8, port: u16) !Co
     log.debug("connected to target {s}:{d}", .{ address, port });
     return .{
         .socket = stream,
-        .address = try allocator.dupe(u8, address),
-        .port = port,
         .reader = .{ .unbuffered_reader = stream.reader() },
         .buf = std.ArrayList(u8).init(allocator),
         .allocator = allocator,
@@ -47,7 +43,6 @@ pub fn deinit(conn: *Conn) void {
     conn.buf.deinit();
     conn.socket.close();
     log.debug("{*} connection shutdown", .{conn});
-    conn.allocator.free(conn.address);
 }
 
 pub const ReadPkt = struct {

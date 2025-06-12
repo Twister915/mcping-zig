@@ -590,7 +590,7 @@ pub const TextComponent = struct {
             @typeName(nbt.Tag),
             "decode",
             bytes_read,
-            "decoded NBT for text component {any}",
+            "{any}",
             .{nbt_tag},
         );
         switch (nbt_tag) {
@@ -1698,25 +1698,31 @@ pub const SlotDisplay = union(SlotDisplayType) {
 };
 
 pub const PlayClientboundPacketID = enum(i32) {
+    spawn_entity = 0x01,
     change_difficulty = 0x0A,
     set_container_content = 0x12,
     set_container_slot = 0x14,
     entity_event = 0x1E,
+    teleport_entity = 0x1F,
     game_event = 0x22,
     initialize_world_border = 0x25,
     keep_alive = 0x26,
     chunk_data = 0x27,
     login = 0x2B,
     map_data = 0x2C,
+    move_entity_position = 0x2E,
+    update_entity_position_and_rotation = 0x2F,
     player_abilities = 0x39,
     player_info_update = 0x3F,
     synchronize_player_position = 0x41,
     recipe_book_add = 0x43,
     recipe_book_settings = 0x45,
+    set_head_rotation = 0x4C,
     server_data = 0x4F,
     set_center_chunk = 0x57,
     set_render_distance = 0x58,
     set_default_spawn_position = 0x5A,
+    set_equiptment = 0x5F,
     set_experience = 0x60,
     set_health = 0x61,
     set_held_item = 0x62,
@@ -1727,29 +1733,36 @@ pub const PlayClientboundPacketID = enum(i32) {
     set_ticking_state = 0x78,
     step_tick = 0x79,
     update_advancements = 0x7B,
+    update_attributes = 0x7C,
     update_recipes = 0x7E,
 
     pub fn Payload(comptime id: PlayClientboundPacketID) type {
         return switch (id) {
+            .spawn_entity => PlaySpawnEntityPacket,
             .change_difficulty => PlayChangeDifficultyPacket,
             .set_container_content => PlaySetContainerContentPacket,
             .set_container_slot => PlaySetContainerSlotPacket,
             .entity_event => PlayEntityEventPacket,
+            .teleport_entity => PlayTeleportEntityPacket,
             .game_event => PlayGameEventPacket,
             .initialize_world_border => PlayInitializeWorldBorderPacket,
             .keep_alive => KeepAlivePacket,
             .chunk_data => PlayChunkDataWithLightPacket,
             .login => PlayLoginPacket,
             .map_data => PlayMapDataPacket,
+            .move_entity_position => PlayMoveEntityPositionPacket,
+            .update_entity_position_and_rotation => PlayUpdateEntityPositionAndRotationPacket,
             .player_abilities => PlayPlayerAbilitiesPacket,
             .player_info_update => PlayPlayerInfoUpdatePacket,
             .synchronize_player_position => PlaySynchronizePlayerPositionPacket,
             .recipe_book_add => PlayRecipeBookAddPacket,
             .recipe_book_settings => PlayRecipeBookSettingsPacket,
+            .set_head_rotation => PlaySetHeadRotationPacket,
             .server_data => PlayServerDataPacket,
             .set_center_chunk => PlaySetCenterChunkPacket,
             .set_render_distance => PlaySetRenderDistancePacket,
             .set_default_spawn_position => PlaySetDefaultSpawnPositionPacket,
+            .set_equiptment => PlaySetEquiptmentPacket,
             .set_experience => PlaySetExperiencePacket,
             .set_health => PlaySetHealthPacket,
             .set_held_item => PlaySetHeldItemPacket,
@@ -1760,6 +1773,7 @@ pub const PlayClientboundPacketID = enum(i32) {
             .set_ticking_state => PlaySetTickingStatePacket,
             .step_tick => PlayStepTickPacket,
             .update_advancements => PlayUpdateAdvancementsPacket,
+            .update_attributes => PlayUpdateAttributesPacket,
             .update_recipes => PlayUpdateRecipesPacket,
         };
     }
@@ -2873,5 +2887,235 @@ pub const PlaySoundEffectPacket = struct {
 
     pub const ENCODING: craft_io.Encoding(@This()) = .{
         .category = .varnum,
+    };
+};
+
+pub const PlayMoveEntityPositionPacket = struct {
+    entity_id: i32,
+    delta: Vector3(i16),
+    on_ground: bool,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .entity_id = .varnum,
+    };
+};
+
+pub const PlaySetHeadRotationPacket = struct {
+    entity_id: i32,
+    head_yaw: u8,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .entity_id = .varnum,
+    };
+};
+
+pub const PlayUpdateEntityPositionAndRotationPacket = struct {
+    entity_id: i32,
+    delta_pos: Vector3(i16),
+    yaw: u8,
+    pitch: u8,
+    on_ground: bool,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .entity_id = .varnum,
+    };
+};
+
+pub const PlayUpdateAttributesPacket = struct {
+    pub const ModifierData = struct {
+        id: []const u8,
+        amount: f64,
+        operation: enum(u8) {
+            add_exact = 0,
+            add_percent = 1,
+            scale_percent = 2,
+        },
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .id = .{ .max_items = MAX_IDENTIFIER_SIZE },
+        };
+    };
+
+    entity_id: i32,
+    properties: []const struct {
+        id: i32,
+        value: f64,
+        modifiers: []const ModifierData,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .id = .varnum,
+        };
+    },
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .entity_id = .varnum,
+    };
+};
+
+pub const PlaySetEquiptmentPacket = struct {
+    pub const EquiptmentSlot = enum(u8) {
+        main_hand = 0,
+        off_hand = 1,
+        boots = 2,
+        leggings = 3,
+        chestplate = 4,
+        helmet = 5,
+        body = 6,
+    };
+
+    pub const Equiptment = struct {
+        slot: EquiptmentSlot,
+        item: Slot,
+    };
+
+    // some helper types for encoding / decoding
+    // a u7 version of the same u8 byte enum
+    const EquiptmentSlotU7: type = @Type(.{ .@"enum" = .{
+        .fields = @typeInfo(EquiptmentSlot).@"enum".fields,
+        .tag_type = u7,
+        .decls = &.{},
+        .is_exhaustive = true,
+    } });
+
+    // flag and slot as a u8, where MSB is "has_more" and
+    // rest (7 bits) is the slot enum
+    const FlagAndSlot = packed struct {
+        has_more: bool,
+        slot: EquiptmentSlotU7,
+    };
+
+    // the actual items encoded in the array
+    const ArrayItem = struct {
+        flag_and_slot: FlagAndSlot,
+        item: Slot,
+    };
+
+    entity_id: i32,
+    equiptment: []const Equiptment,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .entity_id = .varnum,
+    };
+
+    pub fn craftEncode(
+        packet: PlaySetEquiptmentPacket,
+        writer: anytype,
+        allocator: std.mem.Allocator,
+        diag: Diag,
+        comptime encoding: craft_io.Encoding(PlaySetEquiptmentPacket),
+    ) !usize {
+        var bytes_written: usize = 0;
+
+        bytes_written += try craft_io.encode(
+            packet.entity_id,
+            writer,
+            allocator,
+            try diag.child(.{ .field = "entity_id" }),
+            encoding.entity_id,
+        );
+
+        if (packet.equiptment.len > 0) {
+            const equiptment_diag = try diag.child(.{ .field = "equiptment" });
+            const last_idx = packet.equiptment.len - 1;
+            for (packet.equiptment, 0..) |equiptment, idx| {
+                const item_diag = try equiptment_diag.child(.{ .index = idx });
+                const item: ArrayItem = .{
+                    .flag_and_slot = .{
+                        .has_more = idx < last_idx,
+                        .slot = @enumFromInt(@intFromEnum(equiptment.slot)),
+                    },
+                    .item = equiptment.item,
+                };
+                bytes_written += try craft_io.encode(
+                    item,
+                    writer,
+                    allocator,
+                    item_diag,
+                    comptime craft_io.defaultEncoding(ArrayItem),
+                );
+            }
+        }
+
+        return bytes_written;
+    }
+
+    pub fn craftDecode(
+        reader: anytype,
+        arena_allocator: *std.heap.ArenaAllocator,
+        diag: Diag,
+        comptime encoding: craft_io.Encoding(PlaySetEquiptmentPacket),
+    ) craft_io.DecodeRet(PlaySetEquiptmentPacket, @TypeOf(reader)) {
+        var bytes_read: usize = 0;
+        var out: PlaySetEquiptmentPacket = undefined;
+        out.entity_id = (try craft_io.decode(
+            i32,
+            reader,
+            arena_allocator,
+            try diag.child(.{ .field = "entity_id" }),
+            encoding.entity_id,
+        )).unwrap(&bytes_read);
+
+        // literally wtf
+        const allocator = arena_allocator.allocator();
+        var al: std.ArrayList(Equiptment) = .init(allocator);
+        defer al.deinit();
+
+        const equiptment_diag = try diag.child(.{ .field = "equiptment" });
+        var idx: usize = 0;
+        while (true) {
+            const item_diag = try equiptment_diag.child(.{ .index = idx });
+            const next_item: ArrayItem = (try craft_io.decode(
+                ArrayItem,
+                reader,
+                arena_allocator,
+                item_diag,
+                comptime craft_io.defaultEncoding(ArrayItem),
+            )).unwrap(&bytes_read);
+
+            try al.append(.{
+                .slot = @enumFromInt(@intFromEnum(next_item.flag_and_slot.slot)),
+                .item = next_item.item,
+            });
+            idx += 1;
+            if (!next_item.flag_and_slot.has_more) {
+                break;
+            }
+        }
+        out.equiptment = try al.toOwnedSlice();
+        return .{
+            .value = out,
+            .bytes_read = bytes_read,
+        };
+    }
+};
+
+pub const PlayTeleportEntityPacket = struct {
+    entity_id: i32,
+    position: Vector3(f64),
+    velocity: Vector3(f64),
+    yaw: f32,
+    pitch: f32,
+    on_ground: bool,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .entity_id = .varnum,
+    };
+};
+
+pub const PlaySpawnEntityPacket = struct {
+    entity_id: i32,
+    entity_uuid: UUID,
+    type: i32,
+    position: Vector3(f64),
+    pitch: u8,
+    yaw: u8,
+    head_yaw: u8,
+    data: i32,
+    velocity: Vector3(i16),
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .entity_id = .varnum,
+        .type = .varnum,
+        .data = .varnum,
     };
 };
