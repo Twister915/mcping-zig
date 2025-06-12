@@ -254,11 +254,11 @@ pub fn defaultEncoding(comptime Payload: type) Encoding(Payload) {
 
 fn StructEncoding(comptime Struct: type) type {
     const struct_info = @typeInfo(Struct).@"struct";
-    if (struct_info.backing_integer != null) {
+    if (struct_info.backing_integer) |BackingInt| {
         return union(enum) {
             by_fields: StructByFieldsEncoding(Struct),
             as_int: struct {
-                bits: comptime_int,
+                bits: comptime_int = @typeInfo(BackingInt).int.bits,
                 encoding: IntEncoding = .default,
             },
         };
@@ -565,7 +565,10 @@ fn encodeStruct(
     if (struct_info.backing_integer) |RealBackingInt| {
         switch (encoding) {
             .as_int => |int_encoding| {
-                const BackingInt: type = @Type(.{ .int = .{ .bits = int_encoding.bits, .signedness = .unsigned } });
+                const BackingInt: type = @Type(.{ .int = .{
+                    .bits = int_encoding.bits,
+                    .signedness = .unsigned,
+                } });
                 const BackingIntEncoding: type = Encoding(BackingInt);
                 comptime var encoding_for_int: BackingIntEncoding = undefined;
                 comptime if (BackingIntEncoding == void) {
