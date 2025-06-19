@@ -1698,11 +1698,13 @@ pub const SlotDisplay = union(SlotDisplayType) {
 };
 
 pub const PlayClientboundPacketID = enum(i32) {
+    bundle_delimiter = 0x00,
     spawn_entity = 0x01,
     block_update = 0x08,
     change_difficulty = 0x0A,
     set_container_content = 0x12,
     set_container_slot = 0x14,
+    disconnect = 0x1C,
     entity_event = 0x1E,
     teleport_entity = 0x1F,
     game_event = 0x22,
@@ -1716,6 +1718,7 @@ pub const PlayClientboundPacketID = enum(i32) {
     update_entity_position_and_rotation = 0x2F,
     update_entity_rotation = 0x31,
     player_abilities = 0x39,
+    player_chat = 0x3A,
     player_info_update = 0x3F,
     synchronize_player_position = 0x41,
     recipe_book_add = 0x43,
@@ -1744,11 +1747,13 @@ pub const PlayClientboundPacketID = enum(i32) {
 
     pub fn Payload(comptime id: PlayClientboundPacketID) type {
         return switch (id) {
+            .bundle_delimiter => PlayBundleDelimiterPacket,
             .spawn_entity => PlaySpawnEntityPacket,
             .block_update => PlayBlockUpdatePacket,
             .change_difficulty => PlayChangeDifficultyPacket,
             .set_container_content => PlaySetContainerContentPacket,
             .set_container_slot => PlaySetContainerSlotPacket,
+            .disconnect => PlayDisconnectPacket,
             .entity_event => PlayEntityEventPacket,
             .teleport_entity => PlayTeleportEntityPacket,
             .game_event => PlayGameEventPacket,
@@ -1762,6 +1767,7 @@ pub const PlayClientboundPacketID = enum(i32) {
             .update_entity_position_and_rotation => PlayUpdateEntityPositionAndRotationPacket,
             .update_entity_rotation => PlayUpdateEntityRotationPacket,
             .player_abilities => PlayPlayerAbilitiesPacket,
+            .player_chat => PlayPlayerChatMessagePacket,
             .player_info_update => PlayPlayerInfoUpdatePacket,
             .synchronize_player_position => PlaySynchronizePlayerPositionPacket,
             .recipe_book_add => PlayRecipeBookAddPacket,
@@ -1794,6 +1800,8 @@ pub const PlayClientboundPacketID = enum(i32) {
         return id <= 0x82 and id >= 0x00;
     }
 };
+
+pub const PlayBundleDelimiterPacket = struct {};
 
 pub const PlayLoginPacket = struct {
     entity_id: i32,
@@ -3828,5 +3836,138 @@ pub const PlayUpdateEntityRotationPacket = struct {
 
     pub const ENCODING: craft_io.Encoding(@This()) = .{
         .entity_id = .varnum,
+    };
+};
+
+pub const PlayDisconnectPacket = struct {
+    reason: TextComponent,
+};
+
+pub const PlayPlayerChatMessagePacket = struct {
+    pub const Header = struct {
+        global_index: i32,
+        sender: UUID,
+        index: i32,
+        message_signature: ?[256]u8,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .global_index = .varnum,
+            .index = .varnum,
+        };
+    };
+
+    pub const Body = struct {
+        message: []const u8,
+        timestamp: i64,
+        salt: i64,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .message = .{ .max_items = 256 },
+        };
+    };
+
+    pub const SignatureItem = struct {
+        message_id: i32,
+        signature: ?[256]u8,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .{
+            .message_id = .varnum,
+        };
+    };
+
+    pub const FilterType = enum(i32) {
+        pass_through = 0,
+        fully_filtered = 1,
+        partially_filtered = 2,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+    };
+
+    pub const Filter = union(FilterType) {
+        pass_through,
+        fully_filtered,
+        partially_filtered: []i64,
+    };
+
+    pub const Formatting = struct {
+        chat_type: craft_io.IdOr(nbt.NamedTag),
+        sender_name: TextComponent,
+        target_name: ?TextComponent,
+    };
+
+    header: Header,
+    body: Body,
+    signatures: []const SignatureItem,
+    unsigned_content: ?TextComponent,
+    filter: Filter,
+    formatting: Formatting,
+};
+
+pub const PlayServerboundPacketID = enum(i32) {
+    confirm_teleportation = 0x00,
+    chat = 0x07,
+    client_status = 0x0A,
+    keep_alive = 0x1A,
+
+    pub fn idFor(comptime Packet: type) ?@This() {
+        return switch (Packet) {
+            PlayConfirmTeleportationPacket => .confirm_teleportation,
+            PlayClientStatusPacket => .client_status,
+            PlayChatMessagePacket => .chat,
+            KeepAlivePacket => .keep_alive,
+            else => null,
+        };
+    }
+
+    pub fn writePacket(conn: anytype, packet: anytype, diag: Diag) !usize {
+        if (idFor(@TypeOf(packet))) |pkt_id| {
+            return conn.writePacket(@intFromEnum(pkt_id), packet, diag);
+        } else {
+            return error.UnknownPacket;
+        }
+    }
+};
+
+pub const PlayConfirmTeleportationPacket = struct {
+    teleport_id: i32,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .teleport_id = .varnum,
+    };
+};
+
+pub const PlayClientStatusPacket = struct {
+    action: enum(i32) {
+        perform_respawn = 0x00,
+        request_stats = 0x01,
+
+        pub const ENCODING: craft_io.Encoding(@This()) = .varnum;
+    },
+};
+
+pub const PlayChatMessagePacket = struct {
+    message: []const u8,
+    timestamp: i64,
+    salt: i64,
+    signature: ?[]const u8,
+    message_count: i32,
+    acknowledged: [3]u8,
+    checksum: u8,
+
+    pub fn simple(msg: []const u8) @This() {
+        return .{
+            .message = msg,
+            .timestamp = std.time.milliTimestamp(),
+            .salt = std.Random.int(std.crypto.random, i64),
+            .signature = null,
+            .message_count = 0,
+            .acknowledged = .{ 0, 0, 0 },
+            .checksum = 0,
+        };
+    }
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .message = .{ .max_items = 256 },
+        .message_count = .varnum,
     };
 };

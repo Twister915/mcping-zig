@@ -361,7 +361,11 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
                 defer _ = arena_allocator.reset(.retain_capacity);
 
                 for (registry_data_packet.entries) |registry_entry| {
-                    log.debug("registry({s}): {s} -> {any}", .{ registry_data_packet.registry_id, registry_entry.id, registry_entry.data });
+                    log.info("registry({s}): {s} -> {any}", .{
+                        registry_data_packet.registry_id,
+                        registry_entry.id,
+                        registry_entry.data,
+                    });
                 }
             },
             0x08 => {}, // remove resource pack, do nothing
@@ -441,6 +445,8 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
     }
 
     log.debug("switched to play state", .{});
+    var tick_started: bool = false;
+    var num_ticks: u64 = 0;
     play_state: while (true) {
         const play_packet = try conn.readPacket(diag);
         const play_packet_id = std.meta.intToEnum(packets.PlayClientboundPacketID, play_packet.id) catch {
@@ -464,11 +470,48 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
                 const packet_data: PacketT = try play_packet.decodeAs(PacketT, &arena_allocator, diag);
                 defer _ = arena_allocator.reset(.{ .retain_with_limit = 16_384 });
 
-                log.info("play packet -> {any}", .{packet_data});
+                log.info("[rx:play {d}b] {any}", .{ play_packet.bytes_read, packet_data });
 
                 switch (PacketT) {
+                    packets.PlayBundleDelimiterPacket => {
+                        if (tick_started) {
+                            tick_started = false;
+                            num_ticks += 1;
+                            log.debug("tick passed, now at tick {d}", .{num_ticks});
+
+                            if (num_ticks % 50 == 0 and num_ticks > 0) {
+                                _ = try writePlayPacket(
+                                    &conn,
+                                    packets.PlayChatMessagePacket.simple("hello world"),
+                                    diag,
+                                );
+                            }
+                        } else {
+                            tick_started = true;
+                        }
+                    },
+                    packets.PlayLoginPacket => {
+                        if (packet_data.death_location != null) {
+                            _ = try writePlayPacket(
+                                &conn,
+                                packets.PlayClientStatusPacket{ .action = .perform_respawn },
+                                diag,
+                            );
+                        }
+                    },
+                    packets.PlaySynchronizePlayerPositionPacket => {
+                        _ = try writePlayPacket(
+                            &conn,
+                            packets.PlayConfirmTeleportationPacket{ .teleport_id = packet_data.teleport_id },
+                            diag,
+                        );
+                    },
+                    packets.PlayDisconnectPacket => {
+                        log.err("disconnected: {any}", .{packet_data.reason});
+                        return error.Disconnected;
+                    },
                     packets.KeepAlivePacket => {
-                        _ = try conn.writePacket(0x1A, packet_data, diag);
+                        _ = try writePlayPacket(&conn, packet_data, diag);
                     },
                     else => {},
                 }
@@ -483,4 +526,10 @@ fn dumpDiagReports(diag_state: *const Diag.State) void {
     for (diag_state.reports.items) |diag_report| {
         log.warn("diag report: {}", .{diag_report});
     }
+}
+
+fn writePlayPacket(conn: *CraftConn, packet: anytype, diag: Diag) !usize {
+    const bytes_written = try packets.PlayServerboundPacketID.writePacket(conn, packet, diag);
+    log.info("[tx:play {d}b] {any}", .{ bytes_written, packet });
+    return bytes_written;
 }
