@@ -468,7 +468,7 @@ fn loginOffline(allocator: std.mem.Allocator, target: Target, profile: Profile, 
             inline else => |packet_id| {
                 const PacketT = packet_id.Payload();
                 const packet_data: PacketT = try play_packet.decodeAs(PacketT, &arena_allocator, diag);
-                defer _ = arena_allocator.reset(.{ .retain_with_limit = 16_384 });
+                defer _ = arena_allocator.reset(.free_all);
 
                 log.info("[rx:play {d}b] {any}", .{ play_packet.bytes_read, packet_data });
 

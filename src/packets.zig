@@ -1704,6 +1704,7 @@ pub const PlayClientboundPacketID = enum(i32) {
     change_difficulty = 0x0A,
     set_container_content = 0x12,
     set_container_slot = 0x14,
+    damage_event = 0x19,
     disconnect = 0x1C,
     entity_event = 0x1E,
     teleport_entity = 0x1F,
@@ -1711,6 +1712,7 @@ pub const PlayClientboundPacketID = enum(i32) {
     initialize_world_border = 0x25,
     keep_alive = 0x26,
     chunk_data = 0x27,
+    world_event = 0x28,
     update_light = 0x2A,
     login = 0x2B,
     map_data = 0x2C,
@@ -1723,6 +1725,7 @@ pub const PlayClientboundPacketID = enum(i32) {
     synchronize_player_position = 0x41,
     recipe_book_add = 0x43,
     recipe_book_settings = 0x45,
+    remove_entities = 0x46,
     set_head_rotation = 0x4C,
     update_section_blocks = 0x4D,
     server_data = 0x4F,
@@ -1753,6 +1756,7 @@ pub const PlayClientboundPacketID = enum(i32) {
             .change_difficulty => PlayChangeDifficultyPacket,
             .set_container_content => PlaySetContainerContentPacket,
             .set_container_slot => PlaySetContainerSlotPacket,
+            .damage_event => PlayDamageEventPacket,
             .disconnect => PlayDisconnectPacket,
             .entity_event => PlayEntityEventPacket,
             .teleport_entity => PlayTeleportEntityPacket,
@@ -1760,6 +1764,7 @@ pub const PlayClientboundPacketID = enum(i32) {
             .initialize_world_border => PlayInitializeWorldBorderPacket,
             .keep_alive => KeepAlivePacket,
             .chunk_data => PlayChunkDataWithLightPacket,
+            .world_event => PlayWorldEventPacket,
             .update_light => PlayUpdateLightPacket,
             .login => PlayLoginPacket,
             .map_data => PlayMapDataPacket,
@@ -1772,6 +1777,7 @@ pub const PlayClientboundPacketID = enum(i32) {
             .synchronize_player_position => PlaySynchronizePlayerPositionPacket,
             .recipe_book_add => PlayRecipeBookAddPacket,
             .recipe_book_settings => PlayRecipeBookSettingsPacket,
+            .remove_entities => PlayRemoveEntitiesPacket,
             .set_head_rotation => PlaySetHeadRotationPacket,
             .update_section_blocks => PlayUpdateSectionBlocksPacket,
             .server_data => PlayServerDataPacket,
@@ -3901,6 +3907,34 @@ pub const PlayPlayerChatMessagePacket = struct {
     unsigned_content: ?TextComponent,
     filter: Filter,
     formatting: Formatting,
+};
+
+pub const PlayRemoveEntitiesPacket = struct {
+    entity_ids: []const i32,
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .entity_ids = .{ .items = .varnum },
+    };
+};
+
+pub const PlayWorldEventPacket = struct {
+    event: i32,
+    location: craft_io.Position,
+    data: i32,
+    disable_relative_volume: bool,
+};
+
+pub const PlayDamageEventPacket = struct {
+    entity_id: i32,
+    damage_type_id: i32,
+    source_cause_id: craft_io.IdOr(void),
+    source_direct_id: craft_io.IdOr(void),
+    source_position: ?Vector3(f64),
+
+    pub const ENCODING: craft_io.Encoding(@This()) = .{
+        .entity_id = .varnum,
+        .damage_type_id = .varnum,
+    };
 };
 
 pub const PlayServerboundPacketID = enum(i32) {

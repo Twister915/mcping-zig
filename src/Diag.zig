@@ -86,7 +86,7 @@ pub const PathComponent = union(enum) {
     packet_data_length,
     packet_id,
     packet_body,
-    field: []const u8,
+    field: [*:0]const u8,
     tag,
     optional_prefix,
     payload,
